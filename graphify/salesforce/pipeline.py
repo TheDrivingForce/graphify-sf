@@ -52,7 +52,7 @@ def build_sf_graph(extraction: dict, *, resolution: float = 1.0) -> nx.DiGraph:
     """
     G = nx.DiGraph()
     for node in extraction.get("nodes", []):
-        attrs = {k: v for k, v in node.items() if k != "id"}
+        attrs = {k: v for k, v in node.items() if k not in ("id", "source")}
         G.add_node(node["id"], **attrs)
     for edge in extraction.get("edges", []):
         # Skip dangling edges so a self-consistent graph is serialized.

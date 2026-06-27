@@ -134,10 +134,14 @@ def _parser_for(path: Path):
 def _merge_into(all_nodes, node_by_id, node):
     """Merge ``node`` into the accumulated node list, deduping by ``id``.
 
-    First occurrence wins for the ``id`` / ``label`` (ADR-012); subsequent nodes
+    First occurrence wins for ``id`` / ``label`` (ADR-012); subsequent nodes
     with the same ID only fill in attributes the existing node is missing. This
     is what lets a full SObject node (from the Object parser) and a stub SObject
     node (from an Apex SOQL ``FROM`` clause) collapse into a single node.
+
+    Special case: ``file_type`` is upgradeable from ``"concept"`` — a stub or
+    error node that lands first with the generic fallback type is overwritten by
+    any later node carrying a specific type (e.g. ``"sobject"``).
     """
     existing = node_by_id.get(node["id"])
     if existing is None:
@@ -147,7 +151,12 @@ def _merge_into(all_nodes, node_by_id, node):
     for key, value in node.items():
         if key in ("id", "label"):
             continue
-        if existing.get(key) in (None, "", []) and value not in (None, "", []):
+        existing_val = existing.get(key)
+        # Treat "concept" as an unknown/fallback type: a more specific type wins.
+        if key == "file_type" and existing_val == "concept" and value not in (None, "", "concept"):
+            existing[key] = value
+            continue
+        if existing_val in (None, "", []) and value not in (None, "", []):
             existing[key] = value
 
 
@@ -182,7 +191,17 @@ def _merge_lwc_components(all_nodes, all_edges):
         node_by_id.pop(html_id, None)
 
 
-def extract_sf(path, *, cpq_data_dir=None, **kwargs):
+def _strip_fields(all_nodes: list[dict], all_edges: list[dict]) -> None:
+    """Remove all ``field`` nodes and any edges that reference them (in place)."""
+    field_ids = {n["id"] for n in all_nodes if n.get("file_type") == "field"}
+    all_nodes[:] = [n for n in all_nodes if n["id"] not in field_ids]
+    all_edges[:] = [
+        e for e in all_edges
+        if e.get("source") not in field_ids and e.get("target") not in field_ids
+    ]
+
+
+def extract_sf(path, *, cpq_data_dir=None, ooe: bool = True, fields: bool = True, **kwargs):
     """Extract a Salesforce repository into a knowledge graph.
 
     Dispatches every supported Salesforce file under ``path`` to its parser,
@@ -217,6 +236,11 @@ def extract_sf(path, *, cpq_data_dir=None, **kwargs):
             (Price/Product Rules, Conditions, Actions). When given, the real CPQ
             rule logic is merged in before the analysis passes so ``validation_cpq``
             / impact see the fields rules actually read/write (Phase 2).
+        ooe: If ``False``, skip Order of Execution chain generation (smaller graph).
+        fields: If ``False``, remove all ``field`` nodes and their edges after all
+            analysis passes complete. Useful when field-level detail is not needed
+            and a smaller graph is preferred. Passes still run with fields present
+            so CPQ/validation overlap analysis is unaffected.
         **kwargs: Reserved for future options (neo4j-uri, …); currently ignored.
 
     Returns:
@@ -237,7 +261,16 @@ def extract_sf(path, *, cpq_data_dir=None, **kwargs):
     if root.is_file():
         files = [root]
     else:
-        files = sorted(p for p in root.rglob("*") if p.is_file())
+        from graphify.detect import _is_ignored, _load_graphifyignore
+
+        ignore_patterns = _load_graphifyignore(root)
+        ignore_cache: dict = {}
+        files = sorted(
+            p
+            for p in root.rglob("*")
+            if p.is_file()
+            and not _is_ignored(p, root, ignore_patterns, _cache=ignore_cache)
+        )
 
     all_nodes: list[dict] = []
     all_edges: list[dict] = []
@@ -272,11 +305,15 @@ def extract_sf(path, *, cpq_data_dir=None, **kwargs):
     cpq_analysis_pass(all_nodes, all_edges)
     _merge_lwc_components(all_nodes, all_edges)
     mdt_mapping_pass(all_nodes, all_edges)
-    ooe_analysis_pass(all_nodes, all_edges)
+    if ooe:
+        ooe_analysis_pass(all_nodes, all_edges)
     all_edges.extend(governor_limit_analysis_pass(all_nodes, all_edges))
     all_edges.extend(detect_recursive_triggers(all_nodes, all_edges))
     all_edges.extend(permission_analysis_pass(all_nodes, all_edges))
     all_edges.extend(detect_flow_cpq_loops(all_nodes, all_edges))
     all_edges.extend(validation_cpq_analysis_pass(all_nodes, all_edges))
+
+    if not fields:
+        _strip_fields(all_nodes, all_edges)
 
     return {"nodes": all_nodes, "edges": all_edges}

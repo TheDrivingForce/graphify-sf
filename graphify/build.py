@@ -184,7 +184,14 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
         if node.get("file_type") in (None, ""):
             node["file_type"] = "concept"
         ft = node.get("file_type", "")
-        if ft and ft not in {"code", "document", "paper", "image", "rationale", "concept"}:
+        if ft and ft not in {
+            "code", "document", "paper", "image", "rationale", "concept",
+            # Salesforce-specific types (graphify-sf)
+            "sobject", "field", "flow", "validation_rule", "lwc_component",
+            "profile", "permission_set", "permission_set_group", "record_type",
+            "workflow", "cmt_record", "sharing_rule", "custom_label",
+            "cpq_rule", "cpq_condition", "cpq_action", "cpq_qcp_method",
+        }:
             node["file_type"] = _FILE_TYPE_SYNONYMS.get(ft, "concept")
 
     errors = validate_extraction(extraction)

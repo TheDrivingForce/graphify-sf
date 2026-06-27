@@ -1,0 +1,1 @@
+uv run graphify-sfdx extract C:\Development\EventSpark\eventspark-labs\eventspark\document-templates

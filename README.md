@@ -35,7 +35,7 @@ consumption → onboarding, analysis, impact review, and development.**
 - **`__mdt` field mappings** (`mdt_mapping.py`): turns mapping records (e.g.
   `Opportunity_To_Quote_Mapping__mdt`) into traversable `maps_to` field→field edges so
   impact follows the Opp→Quote boundary.
-- **Analysis passes** (whole-graph): Order of Execution, Governor Limits, recursive
+- **Analysis passes** (whole-graph): [Order of Execution](./docs/salesforce/Analysis%20Pass%203%20-%20Order%20of%20Execution.md), Governor Limits, recursive
   triggers, Profile/FLS permission impact, Flow↔CPQ infinite loops, CPQ↔Validation
   Rule conflicts.
 - **Token-minimized consumption** (`pipeline.py`/`query.py`/`cli.py`/`viz.py`): Leiden

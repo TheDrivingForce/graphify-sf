@@ -2,13 +2,21 @@
 graphify-sf: ``graphify sf`` command-line interface.
 
 Subcommands:
-    extract <path> [--output-dir] [--cpq-data]   build + enrich an SF graph.json
+    extract <path> [--output-dir] [--cpq-data] [--no-ooe] [--no-fields]   build + enrich an SF graph.json
+    cluster-only [path] [--graph]               re-cluster an existing SF graph.json (SF-safe)
     serve <graph.json>                           run the base MCP server
     impact <node> [--direction] [--depth]        impact traversal
     violations [--severity]                       diagnostic risks
     cpq-chain <object>                            CPQ Calc Engine order
     ooe <object>                                  Order-of-Execution chain
     sync-release-notes [--dry-run]               Governor Limits staleness sync
+
+    --no-fields            supresses generation of the field nodes in the graph
+    --no-ooe               supresses generation of the order of execution nodes in the graph
+
+Use ``graphify-sfdx cluster-only`` instead of the base ``graphify cluster-only`` — the base
+command runs in a separate Python environment that may not have SF file types whitelisted,
+causing ``sobject`` / ``field`` / ``flow`` nodes to be downgraded to ``concept``.
 
 The query subcommands load an enriched ``graph.json`` (produced by ``extract``)
 and delegate to the pure functions in ``query.py`` — the same ones the MCP tools
@@ -46,7 +54,7 @@ def _cmd_extract(args: argparse.Namespace) -> int:
 
     out_dir = Path(args.output_dir)
     print(f"🚀 Extracting {args.path}")
-    extraction = extract_sf(args.path, cpq_data_dir=args.cpq_data)
+    extraction = extract_sf(args.path, cpq_data_dir=args.cpq_data, ooe=not args.no_ooe, fields=not args.no_fields)
     G = build_sf_graph(extraction)
     graph_file = write_sf_graph(G, out_dir / "graph.json")
 
@@ -110,6 +118,58 @@ def _cmd_ooe(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_cluster_only(args: argparse.Namespace) -> int:
+    """Re-cluster an existing SF graph.json using the SF-aware build path.
+
+    Equivalent to ``graphify cluster-only`` but runs entirely within the
+    graphify-sfdx package so SF file types (sobject, field, flow, …) are
+    preserved.  The base ``graphify cluster-only`` command may run in a
+    separate Python environment whose ``build_from_json`` does not know about
+    SF types and silently downgrades them to ``concept``.
+    """
+    import json as _json
+
+    from graphify.build import build_from_json
+    from graphify.cluster import cluster, remap_communities_to_previous
+    from graphify.export import to_json
+
+    graph_path = Path(args.graph) if args.graph else Path(args.path) / "graphify-out" / "graph.json"
+    if not graph_path.exists():
+        print(f"error: graph not found at {graph_path} — run extract first", file=sys.stderr)
+        return 1
+
+    out_dir = graph_path.parent
+    print(f"Loading {graph_path} …")
+    raw = _json.loads(graph_path.read_text(encoding="utf-8"))
+    _directed = bool(raw.get("directed", False))
+    G = build_from_json(raw, directed=_directed)
+    print(f"Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+
+    print("Re-clustering …")
+    communities = cluster(G, resolution=args.resolution)
+
+    previous_node_community = {
+        n["id"]: n["community"]
+        for n in raw.get("nodes", [])
+        if n.get("community") is not None and n.get("id") is not None
+    }
+    if previous_node_community:
+        communities = remap_communities_to_previous(communities, previous_node_community)
+
+    labels_path = out_dir / ".graphify_labels.json"
+    if labels_path.exists():
+        try:
+            labels = {int(k): v for k, v in _json.loads(labels_path.read_text(encoding="utf-8")).items()}
+        except Exception:
+            labels = {cid: f"Community {cid}" for cid in communities}
+    else:
+        labels = {cid: f"Community {cid}" for cid in communities}
+
+    to_json(G, communities, str(graph_path), community_labels=labels)
+    print(f"✅ {len(communities)} communities. {graph_path} updated.")
+    return 0
+
+
 def _cmd_sync_release_notes(args: argparse.Namespace) -> int:
     from graphify.salesforce.release_sync import sync_release_notes
 
@@ -128,7 +188,19 @@ def _build_parser() -> argparse.ArgumentParser:
     pe.add_argument("path")
     pe.add_argument("--output-dir", default="graphify-out")
     pe.add_argument("--cpq-data", default=None, help="dir of SFDX JSON SBQQ data exports")
+    pe.add_argument("--no-ooe", action="store_true", default=False,
+                    help="skip Order of Execution chain generation (smaller graph)")
+    pe.add_argument("--no-fields", action="store_true", default=False,
+                    help="strip field nodes and their edges from the graph (smaller graph)")
     pe.set_defaults(func=_cmd_extract)
+
+    pco = sub.add_parser("cluster-only", help="re-cluster an existing SF graph.json (SF-safe, use instead of base graphify cluster-only)")
+    pco.add_argument("path", nargs="?", default=".")
+    pco.add_argument("--graph", default=None,
+                     help="explicit path to graph.json (default: <path>/graphify-out/graph.json)")
+    pco.add_argument("--resolution", type=float, default=1.0,
+                     help="Leiden resolution (>1 = more, smaller communities)")
+    pco.set_defaults(func=_cmd_cluster_only)
 
     ps = sub.add_parser("serve", help="run the base MCP server on a graph.json")
     ps.add_argument("graph", nargs="?", default=str(_DEFAULT_GRAPH))

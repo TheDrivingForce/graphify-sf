@@ -83,13 +83,17 @@ def _validation_rule_nid(object_api: str, rule_name: str) -> str:
     return f"validation_{obj}_{rule}"
 
 
-def _field_nid(api_name: str) -> str:
-    """Build a stable node ID for a Custom Field.
+def _field_nid(object_api: str, field_api: str) -> str:
+    """Build a stable node ID for a field scoped to its SObject.
 
-    Example: ``"BillingCity__c"`` -> ``"field_billingcity"``.
+    Uses the full API names (preserving ``__c``) so that fields with the same
+    name on different objects never collide, and the ID is reversible.
+
+    Example: ``("Account", "BillingCity")`` -> ``"field_account_billingcity"``
+             ``("MyObj__c", "Background_Image_URL__c")``
+               -> ``"field_myobj__c_background_image_url__c"``
     """
-    normalized = api_name.lower().replace("__c", "").replace("__", "_")
-    return f"field_{normalized}"
+    return f"field_{object_api.lower()}_{field_api.lower()}"
 
 
 def _parse_error_node(path: Path, error: Exception) -> dict:
@@ -123,10 +127,16 @@ def extract_custom_object(path: Path) -> dict:
         return _parse_error_node(path, exc)
 
     # 1. SObject node ------------------------------------------------------
-    label = root.findtext("md:label", namespaces=_NS) or path.stem
+    # API name from <fullName> (authoritative); fall back to the file stem
+    # (e.g. "Document_Rule__c.object-meta.xml" -> "Document_Rule__c").
+    # The human-readable <label> is kept for display only — the node ID must
+    # be derived from the API name so it merges correctly with stub nodes
+    # created by Apex SOQL, Flow, and lookup-field parsers (ADR-002).
+    api_name = root.findtext("md:fullName", namespaces=_NS) or path.name.split(".")[0]
+    label = root.findtext("md:label", namespaces=_NS) or api_name
     plural_label = root.findtext("md:pluralLabel", namespaces=_NS) or label
 
-    sobject_id = sobject_nid(label)  # CRITICAL: ADR-002 single source of truth
+    sobject_id = sobject_nid(api_name)  # CRITICAL: ADR-002 single source of truth
     nodes: list[dict] = [
         {
             "id": sobject_id,
@@ -134,7 +144,7 @@ def extract_custom_object(path: Path) -> dict:
             "file_type": "sobject",
             "source_file": str(path),
             "sf_plural_label": plural_label,
-            "sf_object_type": "custom" if "__c" in label else "standard",
+            "sf_object_type": "custom" if "__c" in api_name else "standard",
         }
     ]
     edges: list[dict] = []
@@ -155,7 +165,7 @@ def extract_custom_object(path: Path) -> dict:
         field_label = field_elem.findtext("md:label", namespaces=_NS) or field_name
         field_type = field_elem.findtext("md:type", namespaces=_NS)
 
-        field_id = _field_nid(field_name)
+        field_id = _field_nid(api_name, field_name)
         nodes.append(
             {
                 "id": field_id,
@@ -306,7 +316,8 @@ def extract_custom_field(path: Path) -> dict:
     field_label = root.findtext("md:label", namespaces=_NS) or field_name
     field_type = root.findtext("md:type", namespaces=_NS)
 
-    field_id = _field_nid(field_name)
+    parent_api = _parent_object_from_field_path(path)
+    field_id = _field_nid(parent_api or path.parent.name, field_name)
     nodes: list[dict] = [
         {
             "id": field_id,
@@ -318,8 +329,6 @@ def extract_custom_field(path: Path) -> dict:
         }
     ]
     edges: list[dict] = []
-
-    parent_api = _parent_object_from_field_path(path)
     if parent_api:
         parent_id = sobject_nid(parent_api)
         # Ensure the field_of edge is not dangling: include the parent SObject
