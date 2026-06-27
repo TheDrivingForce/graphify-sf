@@ -168,12 +168,27 @@ def extract_cpq_data(data_dir: Path | str) -> dict:
     node_ids: set[str] = set()
     target_fields: dict[str, list[str]] = {}  # rule_id -> [field api names]
 
-    def _ensure_field_node(field_api: str, source_file: str) -> str:
-        fid = _field_nid(field_api)
+    # A condition/action field belongs to the object its rule applies to. Map
+    # each rule -> applies-object so field node IDs are scoped (``_field_nid``),
+    # letting them merge with the same field parsed from object metadata (ADR-002).
+    def _rule_applies_object(rec: dict) -> str:
+        return (
+            rec.get("SBQQ__LookupObject__c")
+            or rec.get("SBQQ__EvaluationEvent__c")
+            or "SBQQ__Quote__c"
+        )
+
+    rule_object: dict[str, str] = {
+        rid: _rule_applies_object(rec) for rid, rec in rules.items()
+    }
+
+    def _ensure_field_node(field_api: str, object_api: str, source_file: str) -> str:
+        fid = _field_nid(object_api, field_api)
         if fid not in node_ids:
             nodes.append({
                 "id": fid, "label": field_api, "file_type": "field",
                 "source_file": source_file, "sf_api_name": field_api,
+                "sf_object": object_api,
             })
             node_ids.add(fid)
         return fid
@@ -194,7 +209,9 @@ def extract_cpq_data(data_dir: Path | str) -> dict:
                           "relation": "cpq_has_condition", "confidence": "EXTRACTED",
                           "source_file": "cpq_data"})
         if field:
-            edges.append({"source": cid, "target": _ensure_field_node(field, "cpq_data"),
+            field_obj = rule_object.get(rule_id, "SBQQ__Quote__c")
+            edges.append({"source": cid,
+                          "target": _ensure_field_node(field, field_obj, "cpq_data"),
                           "relation": "cpq_reads_field", "confidence": "EXTRACTED",
                           "source_file": "cpq_data"})
 
@@ -216,7 +233,9 @@ def extract_cpq_data(data_dir: Path | str) -> dict:
             if field:
                 target_fields.setdefault(rule_id, []).append(field)
         if field:
-            edges.append({"source": aid, "target": _ensure_field_node(field, "cpq_data"),
+            field_obj = rule_object.get(rule_id, "SBQQ__Quote__c")
+            edges.append({"source": aid,
+                          "target": _ensure_field_node(field, field_obj, "cpq_data"),
                           "relation": "cpq_writes_field", "confidence": "EXTRACTED",
                           "source_file": "cpq_data"})
 

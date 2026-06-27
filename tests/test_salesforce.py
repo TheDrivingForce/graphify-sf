@@ -63,7 +63,7 @@ def _assert_no_dangling_edges(result: dict) -> None:
 
 
 def test_objects_parser() -> None:
-    fixture = FIXTURES / "sf_Account.object-meta.xml"
+    fixture = FIXTURES / "Account.object-meta.xml"
     result = extract_custom_object(fixture)
 
     # 1. No error
@@ -257,13 +257,50 @@ def test_lwc_parser() -> None:
     # --- HTML template ---------------------------------------------------
     html_result = extract_lwc_html(FIXTURES / "sf_MyComponent.html")
 
-    # 1. No error + no dangling edges
+    # 1. No error. ``embeds`` edges are sourced from the post-merge BASE id
+    #    (lwc_<stem>), which the HTML parser alone doesn't emit — that node is
+    #    supplied by the JS sibling / merge pass — so they look "dangling" in
+    #    isolation by design. Their *targets* (child stubs) must resolve, and
+    #    the survives-the-merge invariant is covered by the full-org test.
     assert "error" not in html_result
-    _assert_no_dangling_edges(html_result)
+    _assert_no_dangling_edges(
+        {
+            "nodes": html_result["nodes"],
+            "edges": [e for e in html_result["edges"] if e["relation"] != "embeds"],
+        }
+    )
+    _embed_targets = {
+        e["target"] for e in html_result["edges"] if e["relation"] == "embeds"
+    }
+    assert _embed_targets <= {n["id"] for n in html_result["nodes"]}
 
-    html_nodes = [n for n in html_result["nodes"] if n["file_type"] == "lwc_component"]
-    assert len(html_nodes) == 1
-    assert html_nodes[0]["sf_lwc_file_type"] == "html"
+    html_sidecar = [
+        n for n in html_result["nodes"] if n.get("sf_lwc_file_type") == "html"
+    ]
+    assert len(html_sidecar) == 1
+
+    # 2. <c-...> embeds -> embeds edges (LWC -> child LWC). Sourced from the
+    #    BASE component id (lwc_<stem>), NOT the _html sidecar, so they survive
+    #    the merge pass. Base/standard tags (lightning-button) and duplicate
+    #    child tags do NOT produce extra edges. (Fixture stem is "sf_MyComponent"
+    #    -> base id "lwc_sf_mycomponent".)
+    embeds = [e for e in html_result["edges"] if e["relation"] == "embeds"]
+    assert {e["target"] for e in embeds} == {
+        "lwc_accountlist",
+        "lwc_badgesection",
+        "lwc_statusicon",
+    }
+    assert all(e["source"] == "lwc_sf_mycomponent" for e in embeds)
+    assert all(e["confidence"] == "EXTRACTED" for e in embeds)
+    # c-account-list appears twice in the template -> exactly one edge.
+    assert len([e for e in embeds if e["target"] == "lwc_accountlist"]) == 1
+    # Child stubs emitted (no dangling edges) and carry the original tag.
+    assert {n["id"] for n in html_result["nodes"] if n["id"].startswith("lwc_")} >= {
+        "lwc_accountlist",
+        "lwc_badgesection",
+        "lwc_statusicon",
+    }
+    assert any(e.get("sf_embedded_tag") == "c-account-list" for e in embeds)
 
     # --- JavaScript ------------------------------------------------------
     js_result = extract_lwc_js(FIXTURES / "sf_MyComponent.js")
@@ -1536,9 +1573,9 @@ def test_mdt_mapping_pass_separated_form() -> None:
     new = mdt_mapping_pass(nodes, edges)
     assert len(new) == 1
     edge = new[0]
-    # Direction: Main (source) -> Second (target).
-    assert edge["source"] == _field_nid("RequestedDeliveryDate__c")
-    assert edge["target"] == _field_nid("Requested_Delivery_Date__c")
+    # Direction: Main (source) -> Second (target). Field ids are object-scoped.
+    assert edge["source"] == _field_nid("Opportunity", "RequestedDeliveryDate__c")
+    assert edge["target"] == _field_nid("SBQQ__Quote__c", "Requested_Delivery_Date__c")
     assert edge["relation"] == "maps_to"
     assert edge["confidence"] == "INFERRED"
     assert edge["sf_source_object"] == "Opportunity"
@@ -1562,8 +1599,8 @@ def test_mdt_mapping_pass_dotted_form() -> None:
     new = mdt_mapping_pass(nodes, edges)
     maps = [e for e in new if e["relation"] == "maps_to"]
     assert len(maps) == 1
-    assert maps[0]["source"] == _field_nid("Amount")
-    assert maps[0]["target"] == _field_nid("SBQQ__NetAmount__c")
+    assert maps[0]["source"] == _field_nid("Opportunity", "Amount")
+    assert maps[0]["target"] == _field_nid("SBQQ__Quote__c", "SBQQ__NetAmount__c")
     assert maps[0]["confidence"] == "INFERRED"
 
 
@@ -1571,7 +1608,7 @@ def test_custom_setting_enrichment() -> None:
     """A CustomObject with <customSettingsType> is tagged as a Custom Setting."""
     from graphify.salesforce.objects import extract_custom_object
 
-    result = extract_custom_object(FIXTURES / "sf_AppConfig__c.object-meta.xml")
+    result = extract_custom_object(FIXTURES / "AppConfig__c.object-meta.xml")
     sobj = next(n for n in result["nodes"] if n["file_type"] == "sobject")
     assert sobj["sf_is_custom_setting"] is True
     assert sobj["sf_setting_type"] == "List"
@@ -1798,7 +1835,7 @@ class TestExtractSF:
             - classes/   5 Apex files (incl. a QCP plugin + triggers)
             - flows/     3 Flow files
             - objects/   2 Custom Object files
-            - lwc/       1 LWC component pair (html + js)
+            - lwc/       2 LWC component pairs (accountList embeds statusBadge)
             - profiles/  1 Profile
         """
         result = extract_sf(SAMPLE_ORG)
@@ -1838,17 +1875,30 @@ class TestExtractSF:
         )
         assert any(n.get("sf_qcp_implementation") for n in nodes_by_id)
 
-        # 5b. LWC merge pass folded html + js into a single component node.
+        # 5b. LWC merge pass folded html + js into one node per component
+        #     (accountList + statusBadge), each tagged with its template.
         lwc_nodes = [n for n in nodes if n.get("file_type") == "lwc_component"]
-        assert len(lwc_nodes) == 1
-        assert lwc_nodes[0].get("sf_has_template") is True
-        # html sidecar node was removed by the merge.
+        assert len(lwc_nodes) == 2
+        assert all(n.get("sf_has_template") is True for n in lwc_nodes)
+        # html sidecar nodes were removed by the merge.
         assert not any(n.get("sf_lwc_file_type") == "html" for n in nodes)
 
         # 5c. Cross-file LWC -> Apex resolution: @wire targets a real method.
         wire_edges = [e for e in edges if e["relation"] == "wire_to"]
         assert wire_edges
         assert all(e["target"] in node_ids for e in wire_edges)
+
+        # 5c-bis. LWC -> LWC composition: accountList embeds statusBadge, and the
+        #         embeds edge survives the merge (sourced from the base id, not
+        #         the dropped _html sidecar) with both endpoints resolving.
+        embeds_edges = [e for e in edges if e["relation"] == "embeds"]
+        assert embeds_edges
+        assert all(e["source"] in node_ids and e["target"] in node_ids
+                   for e in embeds_edges)
+        assert any(
+            e["source"] == "lwc_accountlist" and e["target"] == "lwc_statusbadge"
+            for e in embeds_edges
+        )
 
         # 5d. Governor pass flagged the SOQL-in-loop in the trigger.
         gov_edges = [e for e in edges if e.get("relation") == "governor_violation"]

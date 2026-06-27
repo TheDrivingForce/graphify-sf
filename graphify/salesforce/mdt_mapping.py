@@ -40,10 +40,17 @@ _SOURCE_HINTS = frozenset({"main", "source", "from", "first", "primary", "origin
 _TARGET_HINTS = frozenset({"second", "target", "to", "dest", "destination", "result"})
 
 
-def _field_nid(api_name: str) -> str:
-    """Mirror ``objects._field_nid`` so resolved fields merge with parsed ones."""
-    normalized = api_name.lower().replace("__c", "").replace("__", "_")
-    return f"field_{normalized}"
+def _field_nid(object_api: str | None, field_api: str) -> str:
+    """Object-scoped field node ID, delegating to ``objects._field_nid``.
+
+    The owning object is required for a field to merge with the same field
+    parsed from object metadata (ADR-002). When a mapping record omits the
+    object, fall back to ``"unknown"`` so the ID is still stable (the field
+    simply won't merge with a parsed node).
+    """
+    from graphify.salesforce.objects import _field_nid as _scoped_field_nid
+
+    return _scoped_field_nid(object_api or "unknown", field_api)
 
 
 def _norm_key(key: str) -> str:
@@ -142,7 +149,7 @@ def mdt_mapping_pass(nodes: list[dict], edges: list[dict]) -> list[dict]:
                 pairs.append((refs[0], t, "AMBIGUOUS"))
 
         for (_, sobj, sfld), (_, tobj, tfld), conf in pairs:
-            sid, tid = _field_nid(sfld), _field_nid(tfld)
+            sid, tid = _field_nid(sobj, sfld), _field_nid(tobj, tfld)
             if sid == tid:
                 continue
             _ensure_field(nodes, by_id, sid, sfld, sobj, record)

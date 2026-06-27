@@ -53,6 +53,7 @@ SF_RELATION_TO_NEO4J_TYPE: dict[str, str] = {
     "flow_invokes": "FLOW_INVOKES",
     # LWC
     "wire_to": "WIRE_TO",
+    "embeds": "EMBEDS",
     # Permission
     "grants_access_to": "GRANTS_ACCESS_TO",
     "field_of": "FIELD_OF",

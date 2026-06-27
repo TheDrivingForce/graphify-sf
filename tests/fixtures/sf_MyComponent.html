@@ -2,5 +2,9 @@
     <div class="container">
         <p>{label}</p>
         <lightning-button label="Load Accounts" onclick={handleLoadAccounts}></lightning-button>
+        <c-account-list records={accounts}></c-account-list>
+        <c-badge-section title="Status"></c-badge-section>
+        <c-account-list records={moreAccounts}></c-account-list>
+        <c-status-icon></c-status-icon>
     </div>
 </template>

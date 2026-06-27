@@ -8,7 +8,9 @@ two results are reconciled later by ``merge_lwc_component()`` in the analysis
 pass, NOT here.
 
 Extracted signal:
-    - ``extract_lwc_html``: an ``lwc_component`` node for the template.
+    - ``extract_lwc_html``: an ``lwc_component`` node for the template, plus
+      ``embeds`` edges to each LOCAL custom child component referenced via a
+      ``c-`` tag (e.g. ``<c-badge-section>``).
     - ``extract_lwc_js``: an ``lwc_component`` node for the controller, plus
       ``wire_to`` edges (``@wire`` decorator -> imported Apex method) and
       ``@api`` public properties recorded as node attributes.
@@ -48,6 +50,12 @@ _API_PROP_RE = re.compile(r"@api\s+(\w+)")
 #: component name (more reliable than the file stem, which may carry prefixes).
 _CLASS_DECL_RE = re.compile(r"export\s+default\s+class\s+(\w+)")
 
+#: ``<c-badge-section ...>`` / ``<c-badge-section/>`` — a LOCAL custom LWC
+#: embedded in a template. The ``c-`` namespace is the default for custom LWCs;
+#: base (``lightning-``) and managed-package namespaces are intentionally
+#: excluded. Captures the kebab-case component name after the ``c-`` prefix.
+_EMBED_RE = re.compile(r"<c-([a-z0-9]+(?:-[a-z0-9]+)*)\b")
+
 
 def _lwc_id(path: Path) -> str:
     """Build the component node ID (``lwc_<lowercased-stem>``).
@@ -57,6 +65,16 @@ def _lwc_id(path: Path) -> str:
     attribute rather than baked into the ID.
     """
     return f"lwc_{path.stem.lower()}"
+
+
+def _embedded_lwc_id(tag_name: str) -> str:
+    """Map a kebab-case ``c-`` tag name to its component node ID.
+
+    ``"badge-section"`` -> ``"lwc_badgesection"``. Removing hyphens and
+    lowercasing mirrors ``_lwc_id`` on the camelCase folder name, so the edge
+    resolves to the same node (cross-file resolution, ADR-002).
+    """
+    return f"lwc_{tag_name.replace('-', '').lower()}"
 
 
 def _apex_method_nid(apex_class: str, apex_method: str) -> str:
@@ -88,34 +106,71 @@ def _parse_error_node(path: Path, error_type: str, error: Exception) -> dict:
 def extract_lwc_html(path: Path) -> dict:
     """Parse an LWC ``*.html`` template file.
 
-    Emits a single ``lwc_component`` node tagged ``sf_lwc_file_type: "html"``.
-    The template structure / event handlers are intentionally not modelled — the
-    JS controller carries the analyzable behavior; the HTML node exists so the
-    merge pass can pair it with its controller.
+    Emits a single ``lwc_component`` node tagged ``sf_lwc_file_type: "html"``,
+    plus an ``embeds`` edge for every LOCAL custom child component referenced in
+    the template via a ``c-`` tag (e.g. ``<c-badge-section>``). Base Lightning
+    components (``<lightning-...>``), Aura, and standard HTML are ignored. The
+    template structure / event handlers are otherwise not modelled — the JS
+    controller carries the analyzable behavior; the HTML node exists so the merge
+    pass can pair it with its controller.
+
+    The ``embeds`` edge is sourced from the BASE component ID (``lwc_<stem>``),
+    not this HTML sidecar node (``lwc_<stem>_html``): ``_merge_lwc_components``
+    folds the sidecar into the base node and drops it, so a sidecar-sourced edge
+    would become dangling. Each child is emitted as a stub ``lwc_component`` node
+    (ADR-012, no dangling edges) that merges with the child's real node via the
+    shared ID (cross-file resolution, ADR-002).
 
     Returns:
-        ``{"nodes": [...], "edges": []}``; a ``concept`` error node on read
+        ``{"nodes": [...], "edges": [...]}``; a ``concept`` error node on read
         failure (graceful degradation, ADR-009).
     """
     path = Path(path)
     try:
         with open(path, "r", encoding="utf-8") as f:
-            f.read()
+            html_content = f.read()
     except (OSError, UnicodeDecodeError) as exc:
         return _parse_error_node(path, "html_parse_error", exc)
 
-    return {
-        "nodes": [
+    base_id = _lwc_id(path)
+    nodes: list[dict] = [
+        {
+            "id": f"{base_id}_html",
+            "label": f"{path.stem} (HTML)",
+            "file_type": "lwc_component",
+            "source_file": str(path),
+            "sf_lwc_file_type": "html",
+        }
+    ]
+    edges: list[dict] = []
+
+    # ``<c-...>`` embeds -> embeds edges (LWC -> child LWC component).
+    seen: set[str] = set()
+    for m in _EMBED_RE.finditer(html_content):
+        child_id = _embedded_lwc_id(m.group(1))
+        if child_id == base_id or child_id in seen:
+            continue  # ignore self-reference / duplicate tags
+        seen.add(child_id)
+        nodes.append(
             {
-                "id": f"{_lwc_id(path)}_html",
-                "label": f"{path.stem} (HTML)",
+                "id": child_id,
+                "label": m.group(1),
                 "file_type": "lwc_component",
                 "source_file": str(path),
-                "sf_lwc_file_type": "html",
             }
-        ],
-        "edges": [],
-    }
+        )
+        edges.append(
+            {
+                "source": base_id,
+                "target": child_id,
+                "relation": "embeds",
+                "confidence": "EXTRACTED",
+                "source_file": str(path),
+                "sf_embedded_tag": f"c-{m.group(1)}",
+            }
+        )
+
+    return {"nodes": nodes, "edges": edges}
 
 
 def extract_lwc_js(path: Path) -> dict:
