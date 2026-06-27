@@ -76,6 +76,62 @@ _NON_SOBJECT_TYPES = {
 }
 
 
+def _strip_comments(source: str) -> str:
+    """Blank out ``//`` line and ``/* */`` block comments (incl. ``/** */`` doc).
+
+    Comment characters are replaced with spaces and newlines are preserved, so
+    the result is the SAME length with the SAME line breaks as the input — line
+    numbers and offsets used by loop / SOQL / DML detection stay accurate. String
+    literals are skipped so a ``//`` or ``/*`` inside a string is not treated as
+    a comment.
+
+    This prevents comment text from polluting the parse — e.g. a doc comment
+    "This class must be kept in sync" no longer makes ``_DEFINITION_RE`` match
+    ``class must``, and commented-out SOQL/DML/methods produce no phantom nodes.
+    """
+    out: list[str] = []
+    i, n = 0, len(source)
+    while i < n:
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < n else ""
+        # String literals — Apex strings are single-quoted; copy verbatim so an
+        # embedded // or /* is not mistaken for a comment. \' is an escaped quote.
+        if ch == "'":
+            out.append(ch)
+            i += 1
+            while i < n:
+                out.append(source[i])
+                if source[i] == "\\" and i + 1 < n:
+                    out.append(source[i + 1])
+                    i += 2
+                    continue
+                if source[i] == "'":
+                    i += 1
+                    break
+                i += 1
+            continue
+        # Line comment: blank to end of line, keep the newline.
+        if ch == "/" and nxt == "/":
+            while i < n and source[i] != "\n":
+                out.append(" ")
+                i += 1
+            continue
+        # Block comment (covers /** doc */): blank through */, preserving newlines.
+        if ch == "/" and nxt == "*":
+            out.append("  ")
+            i += 2
+            while i < n and not (source[i] == "*" and i + 1 < n and source[i + 1] == "/"):
+                out.append("\n" if source[i] == "\n" else " ")
+                i += 1
+            if i < n:  # consume the closing */
+                out.append("  ")
+                i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _find_loop_ranges(source: str) -> list[tuple[int, int]]:
     """Return ``(start_line, end_line)`` ranges for each for/while loop body.
 
@@ -203,11 +259,17 @@ def extract_apex_enhanced(path: Path) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         source = f.read()
 
+    # Match against a comment-stripped copy so comment text (e.g. a doc comment
+    # "This class must be kept in sync") and commented-out code do not pollute
+    # the parse. ``scan`` preserves line numbers/offsets; the ORIGINAL ``source``
+    # is still stored on the node for the CPQ / governor passes.
+    scan = _strip_comments(source)
+
     nodes: list[dict] = []
     edges: list[dict] = []
 
     # 1. Class / trigger definition --------------------------------------
-    definition = _DEFINITION_RE.search(source)
+    definition = _DEFINITION_RE.search(scan)
     if not definition:
         return {"nodes": [], "edges": [], "error": "No class/trigger found"}
 
@@ -227,7 +289,7 @@ def extract_apex_enhanced(path: Path) -> dict:
     )
 
     # 2. Method signatures ------------------------------------------------
-    for method in _METHOD_RE.finditer(source):
+    for method in _METHOD_RE.finditer(scan):
         return_type, method_name, params = (
             method.group(2),
             method.group(3),
@@ -255,7 +317,7 @@ def extract_apex_enhanced(path: Path) -> dict:
         )
 
     # 3. SOQL queries (cross-file resolution) -----------------------------
-    for sobject_name, line_no, in_loop in _detect_soql_objects(source):
+    for sobject_name, line_no, in_loop in _detect_soql_objects(scan):
         target_id = sobject_nid(sobject_name)
         _ensure_sobject_node(nodes, target_id, sobject_name, path)
         edges.append(
@@ -271,9 +333,9 @@ def extract_apex_enhanced(path: Path) -> dict:
         )
 
     # 4. DML operations ---------------------------------------------------
-    var_types = _build_var_types(source)
+    var_types = _build_var_types(scan)
     for dml_type, sobject_name, line_no, in_loop in _detect_dml_operations(
-        source, var_types
+        scan, var_types
     ):
         target_id = sobject_nid(sobject_name)
         _ensure_sobject_node(nodes, target_id, sobject_name, path)
@@ -294,8 +356,8 @@ def extract_apex_enhanced(path: Path) -> dict:
 
     # 5. Implements (QCP / Batchable hint) --------------------------------
     if (
-        f"implements {CPQ_QCP_INTERFACE}" in source
-        or "implements QuoteCalculatorPlugin" in source
+        f"implements {CPQ_QCP_INTERFACE}" in scan
+        or "implements QuoteCalculatorPlugin" in scan
     ):
         qcp_id = "sbqq_quotecalculatorplugin"
         if not any(n["id"] == qcp_id for n in nodes):
@@ -318,7 +380,7 @@ def extract_apex_enhanced(path: Path) -> dict:
             }
         )
 
-    if "implements Database.Batchable" in source:
+    if "implements Database.Batchable" in scan:
         nodes[0]["sf_async_pattern"] = "batchable"
 
     return {"nodes": nodes, "edges": edges}

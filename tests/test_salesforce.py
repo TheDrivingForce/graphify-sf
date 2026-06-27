@@ -145,6 +145,50 @@ def test_apex_parser() -> None:
     )
 
 
+def test_apex_parser_ignores_comments(tmp_path: Path) -> None:
+    """Comment text / commented-out code must not pollute the parse.
+
+    Regression: a doc comment "This class must be kept in sync" made
+    ``_DEFINITION_RE`` match ``class must`` (label became "must") before the real
+    declaration. Commented-out SOQL/DML/implements must likewise be ignored.
+    """
+    cls = tmp_path / "Documented.cls"
+    cls.write_text(
+        "/**\n"
+        " * NB: This class must be kept in sync with the DTO.\n"
+        " * TODO: update opps; and [SELECT Id FROM Contact];\n"
+        " */\n"
+        "public with sharing class Documented {\n"
+        "    // implements Database.Batchable<SObject> -- commented out\n"
+        "    public void run() {\n"
+        "        // List<Lead> leads = [SELECT Id FROM Lead]; commented SOQL\n"
+        "        List<Account> accs = [SELECT Id FROM Account];\n"
+        "        update accs;\n"
+        "        String note = 'keep // and /* inside strings */ intact';\n"
+        "    }\n"
+        "}\n", encoding="utf-8")
+    result = extract_apex_enhanced(cls)
+    _assert_no_dangling_edges(result)
+
+    # Class label comes from the real declaration, not the doc comment.
+    classes = [n for n in result["nodes"] if n.get("sf_code_type") == "class"]
+    assert len(classes) == 1
+    assert classes[0]["label"] == "Documented"
+
+    # Only the real SOQL (Account) is detected — Contact/Lead are in comments.
+    queried = {
+        n["label"] for n in result["nodes"] if n.get("file_type") == "sobject"
+    }
+    assert "Account" in queried
+    assert "Contact" not in queried and "Lead" not in queried
+
+    # The commented-out `implements Database.Batchable` did not set the pattern.
+    assert classes[0].get("sf_async_pattern") is None
+
+    # The original (un-stripped) source is preserved on the node for later passes.
+    assert "must be kept in sync" in classes[0]["source"]
+
+
 def test_apex_soql_relationship_subquery_not_sobject(tmp_path: Path) -> None:
     """A ``__r`` child-relationship subquery target must NOT become an sobject.
 
