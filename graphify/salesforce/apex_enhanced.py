@@ -5,7 +5,7 @@ Regex-based parser for Apex ``*.cls`` / ``*.trigger`` files (ADR-019 — regex
 first, tree-sitter deferred to Phase 3). It extracts:
 
     - The class / trigger definition node (full source kept for later passes).
-    - Method signatures (``calls`` edge back to the owning class).
+    - Method signatures (``method_of`` membership edge back to the owning class).
     - SOQL queries (``queries`` edge -> SObject, ``sf_in_loop`` tagged).
     - DML operations (``dml_operates_on`` edge -> SObject, ``sf_in_loop`` tagged).
     - ``implements`` of well-known interfaces (QCP, Database.Batchable hint).
@@ -250,10 +250,30 @@ def _ensure_sobject_node(
 def extract_apex_enhanced(path: Path) -> dict:
     """Parse an Apex class / trigger file into graph nodes and edges.
 
+    Tree-sitter is the primary parser (``apex_ts.extract_apex``). When the Apex
+    grammar is not installed (the optional ``graphify-sfdx[apex]`` extra), this
+    falls back to the legacy regex parser below so analysis still runs — both
+    emit the same node/edge shapes and the same ``apex_<class>`` ids (ADR-002,
+    ADR-019). The public name is unchanged so dispatch / callers are unaffected.
+
     Returns:
         ``{"nodes": [...], "edges": [...]}``. If no class/trigger declaration is
         found, returns empty lists plus an ``"error"`` key (ADR-009 lenient: the
         caller skips the file and keeps analyzing).
+    """
+    from graphify.salesforce.apex_ts import _get_language, extract_apex
+
+    if _get_language() is not None:
+        return extract_apex(path)
+    # Grammar unavailable — degrade to the regex parser (parity-period fallback).
+    return _extract_apex_regex(path)
+
+
+def _extract_apex_regex(path: Path) -> dict:
+    """Legacy regex Apex parser (fallback when the tree-sitter grammar is absent).
+
+    Retained verbatim from ADR-019 Phase 1. Kept as a safety net during the
+    tree-sitter migration; emits the same node/edge shapes as ``apex_ts``.
     """
     path = Path(path)
     with open(path, "r", encoding="utf-8") as f:
@@ -308,9 +328,10 @@ def extract_apex_enhanced(path: Path) -> dict:
         )
         edges.append(
             {
+                # Membership edge: method belongs to its class (mirrors field_of).
                 "source": method_id,
                 "target": class_id,
-                "relation": "calls",
+                "relation": "method_of",
                 "confidence": "EXTRACTED",
                 "source_file": str(path),
             }

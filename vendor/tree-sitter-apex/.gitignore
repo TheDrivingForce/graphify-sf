@@ -1,0 +1,7 @@
+# Build artifacts — only the source (parser.c, headers, bindings) is vendored.
+build/
+dist/
+*.pyd
+*.so
+*.o
+*.egg-info/

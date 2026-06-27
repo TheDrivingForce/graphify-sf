@@ -246,6 +246,7 @@ def extract_sf(path, *, cpq_data_dir=None, ooe: bool = True, fields: bool = True
     Returns:
         ``{"nodes": [...], "edges": [...]}`` — the merged, analyzed graph.
     """
+    from .apex_calls import resolve_apex_calls
     from .cpq import cpq_analysis_pass
     from .flow_cpq_loops import detect_flow_cpq_loops
     from .mdt_mapping import mdt_mapping_pass
@@ -307,6 +308,10 @@ def extract_sf(path, *, cpq_data_dir=None, ooe: bool = True, fields: bool = True
     mdt_mapping_pass(all_nodes, all_edges)
     if ooe:
         ooe_analysis_pass(all_nodes, all_edges)
+    # Resolve cross-file Apex->Apex calls BEFORE recursion detection so the new
+    # `calls` edges feed cycle enumeration (ADR-027). Intra-file calls were
+    # already emitted by the parser.
+    all_edges.extend(resolve_apex_calls(all_nodes, all_edges))
     all_edges.extend(governor_limit_analysis_pass(all_nodes, all_edges))
     all_edges.extend(detect_recursive_triggers(all_nodes, all_edges))
     all_edges.extend(permission_analysis_pass(all_nodes, all_edges))

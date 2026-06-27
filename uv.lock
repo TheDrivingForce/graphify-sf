@@ -1216,6 +1216,9 @@ all = [
 anthropic = [
     { name = "anthropic" },
 ]
+apex = [
+    { name = "tree-sitter-apex" },
+]
 bedrock = [
     { name = "boto3" },
 ]
@@ -1349,6 +1352,7 @@ requires-dist = [
     { name = "tiktoken", marker = "extra == 'kimi'" },
     { name = "tiktoken", marker = "extra == 'openai'" },
     { name = "tree-sitter", specifier = ">=0.23.0,<0.26" },
+    { name = "tree-sitter-apex", marker = "extra == 'apex'", directory = "vendor/tree-sitter-apex" },
     { name = "tree-sitter-bash", specifier = ">=0.23,<0.27" },
     { name = "tree-sitter-c", specifier = ">=0.23,<0.25" },
     { name = "tree-sitter-c-sharp", specifier = ">=0.23,<0.25" },
@@ -1385,7 +1389,7 @@ requires-dist = [
     { name = "yt-dlp", marker = "extra == 'all'" },
     { name = "yt-dlp", marker = "extra == 'video'" },
 ]
-provides-extras = ["mcp", "neo4j", "falkordb", "pdf", "watch", "svg", "leiden", "office", "google", "postgres", "video", "kimi", "ollama", "bedrock", "anthropic", "gemini", "openai", "chinese", "sql", "dm", "terraform", "all"]
+provides-extras = ["mcp", "neo4j", "falkordb", "pdf", "watch", "svg", "leiden", "office", "google", "postgres", "video", "kimi", "ollama", "bedrock", "anthropic", "gemini", "openai", "chinese", "sql", "dm", "terraform", "apex", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -4728,6 +4732,17 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/03/87/af9604ebe275a9345d88c3ace0cf2a1341aa3f8ef49dd9fc11662132df8a/tree_sitter-0.25.2-cp314-cp314-win_amd64.whl", hash = "sha256:4973b718fcadfb04e59e746abfbb0288694159c6aeecd2add59320c03368c721", size = 130864, upload-time = "2025-09-25T17:37:57.453Z" },
     { url = "https://files.pythonhosted.org/packages/a6/6e/e64621037357acb83d912276ffd30a859ef117f9c680f2e3cb955f47c680/tree_sitter-0.25.2-cp314-cp314-win_arm64.whl", hash = "sha256:b8d4429954a3beb3e844e2872610d2a4800ba4eb42bb1990c6a4b1949b18459f", size = 117470, upload-time = "2025-09-25T17:37:58.431Z" },
 ]
+
+[[package]]
+name = "tree-sitter-apex"
+version = "0.1.0"
+source = { directory = "vendor/tree-sitter-apex" }
+dependencies = [
+    { name = "tree-sitter" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "tree-sitter", specifier = ">=0.25,<0.26" }]
 
 [[package]]
 name = "tree-sitter-bash"

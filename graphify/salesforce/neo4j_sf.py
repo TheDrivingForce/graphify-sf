@@ -49,6 +49,7 @@ SF_RELATION_TO_NEO4J_TYPE: dict[str, str] = {
     "triggers_on": "TRIGGERS_ON",
     "queries": "QUERIES",
     "dml_operates_on": "DML_OPERATES_ON",
+    "method_of": "METHOD_OF",
     # Flow
     "flow_invokes": "FLOW_INVOKES",
     # LWC

@@ -124,10 +124,11 @@ def test_apex_parser() -> None:
     method_ids = {n["id"] for n in methods}
     assert f"{classes[0]['id']}_getaccounts" in method_ids
     assert f"{classes[0]['id']}_updateaccount" in method_ids
-    # each method -> class via calls edge
-    calls = [e for e in cls_result["edges"] if e["relation"] == "calls"]
-    assert all(e["target"] == classes[0]["id"] for e in calls)
-    assert len(calls) == len(methods)
+    # each method -> class via method_of membership edge (mirrors field_of)
+    method_of = [e for e in cls_result["edges"] if e["relation"] == "method_of"]
+    assert all(e["source"] in method_ids for e in method_of)
+    assert all(e["target"] == classes[0]["id"] for e in method_of)
+    assert len(method_of) == len(methods)
 
     # 3. SOQL detected (FROM Account), CRITICAL: target uses sobject_nid()
     cls_queries = [e for e in cls_result["edges"] if e["relation"] == "queries"]
@@ -143,6 +144,32 @@ def test_apex_parser() -> None:
         e["target"] == sobject_nid("Account") and e["sf_dml_type"] == "UPDATE"
         for e in cls_dml
     )
+
+
+def test_apex_parser_handles_interfaces(tmp_path: Path) -> None:
+    """The tree-sitter parser models ``interface`` declarations and their methods.
+
+    The legacy regex parser only matched ``class``/``trigger`` and emitted an
+    error for interfaces. The AST parser parses them as ``sf_code_type:interface``
+    code nodes — verified here so the capability is pinned (Phase A).
+    """
+    cls = tmp_path / "MyHandler.cls"
+    cls.write_text(
+        "public interface MyHandler {\n"
+        "    String getName();\n"
+        "    void run(Id recordId);\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    result = extract_apex_enhanced(cls)
+    assert "error" not in result
+    ifaces = [n for n in result["nodes"] if n.get("sf_code_type") == "interface"]
+    assert len(ifaces) == 1
+    assert ifaces[0]["label"] == "MyHandler"
+    assert ifaces[0]["id"] == "apex_myhandler"
+    methods = {n["label"] for n in result["nodes"] if n.get("sf_method_type") == "method"}
+    assert any(m.startswith("getName(") for m in methods)
+    assert any(m.startswith("run(") for m in methods)
 
 
 def test_apex_parser_ignores_comments(tmp_path: Path) -> None:
@@ -231,6 +258,89 @@ def test_apex_soql_relationship_subquery_not_sobject(tmp_path: Path) -> None:
     assert len(opp_dml) == 1
     assert opp_dml[0]["sf_in_loop"] is True
     assert opp_dml[0]["sf_dml_type"] == "UPDATE"
+
+
+def test_apex_overloaded_methods_get_distinct_ids() -> None:
+    """Overloaded methods get distinct node ids; a lone method keeps the bare id.
+
+    Phase B: ``process(Id)`` and ``process(List<Id>)`` must not collapse onto one
+    id. The non-overloaded ``log`` keeps ``apex_<class>_log`` so the cross-parser
+    ``apex_<class>_<method>`` contract (lwc/flow/profiles) still resolves.
+    """
+    result = extract_apex_enhanced(FIXTURES / "sf_Overloads.cls")
+    assert "error" not in result
+    method_ids = {n["id"] for n in result["nodes"] if n.get("sf_method_type") == "method"}
+    assert "apex_sf_overloads_process_id" in method_ids
+    assert "apex_sf_overloads_process_list_id" in method_ids
+    # Lone method keeps the un-suffixed id.
+    assert "apex_sf_overloads_log" in method_ids
+    # Same-class call process(List<Id>) -> log is an EXTRACTED method->method
+    # `calls` edge (membership is method_of, so `calls` is only real calls).
+    method_calls = [
+        e for e in result["edges"]
+        if e["relation"] == "calls" and e["target"] == "apex_sf_overloads_log"
+    ]
+    assert any(e["source"] == "apex_sf_overloads_process_list_id" for e in method_calls)
+
+
+def test_apex_cross_file_calls_resolve(tmp_path: Path) -> None:
+    """``resolve_apex_calls`` links a typed-instance call across files.
+
+    ``sf_CallerA.run`` does ``sf_CalleeB b = ...; b.bar(42);`` — the SF-wide pass
+    resolves it to ``sf_CalleeB.bar``. A call to a non-existent method
+    (``sf_CalleeB.staticThing()``) is dropped, not guessed.
+    """
+    from graphify.salesforce.apex_calls import resolve_apex_calls
+
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    for name in ("sf_CallerA.cls", "sf_CalleeB.cls"):
+        res = extract_apex_enhanced(FIXTURES / name)
+        nodes += res["nodes"]
+        edges += res["edges"]
+
+    new_edges = resolve_apex_calls(nodes, edges)
+    resolved = {(e["source"], e["target"]) for e in new_edges}
+    assert ("apex_sf_callera_run", "apex_sf_calleeb_bar") in resolved
+    # staticThing() does not exist on sf_CalleeB -> no edge invented.
+    assert not any(t.endswith("staticthing") for _s, t in resolved)
+    # Metadata is cleared off the nodes after resolution.
+    assert all("sf_unresolved_calls" not in n for n in nodes)
+
+
+def test_apex_guarded_recursion_downgraded(tmp_path: Path) -> None:
+    """A guarded mutual-recursion cycle is reported but downgraded to LOW.
+
+    Phase B introduces real method->method ``calls`` cycles. The recursion-guard
+    scan (ADR-027) reads the method node's ``source``; a static bypass flag must
+    still downgrade the violation from HIGH to LOW.
+    """
+    from graphify.salesforce.apex_calls import resolve_apex_calls
+    from graphify.salesforce.governor_limits import detect_recursive_triggers
+
+    cls = tmp_path / "Recur.cls"
+    cls.write_text(
+        "public class Recur {\n"
+        "    public static Boolean isRunning = false;\n"
+        "    public void a() {\n"
+        "        if (isRunning) { return; }\n"
+        "        isRunning = true;\n"
+        "        b();\n"
+        "    }\n"
+        "    public void b() {\n"
+        "        a();\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    res = extract_apex_enhanced(cls)
+    nodes, edges = res["nodes"], list(res["edges"])
+    edges += resolve_apex_calls(nodes, edges)
+    violations = detect_recursive_triggers(nodes, edges)
+    recur = [v for v in violations if v.get("sf_violation_type") == "recursive_trigger"]
+    assert recur, "expected a recursive-trigger violation for the a()<->b() cycle"
+    assert all(v["sf_severity"] == "LOW" for v in recur)
+    assert all(v["sf_safe_recursion"] for v in recur)
 
 
 def test_flow_parser() -> None:

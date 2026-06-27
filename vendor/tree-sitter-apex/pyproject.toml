@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tree-sitter-apex"
+version = "0.1.0"
+description = "Apex grammar for tree-sitter (built from aheber/tree-sitter-sfapex)"
+requires-python = ">=3.9"
+dependencies = ["tree-sitter>=0.25,<0.26"]
+
+[tool.setuptools]
+packages = ["tree_sitter_apex"]
+
+[tool.setuptools.package-data]
+tree_sitter_apex = ["*.pyi", "py.typed"]

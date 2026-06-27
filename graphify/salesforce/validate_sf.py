@@ -55,6 +55,8 @@ SF_RELATIONS = {
     "triggers_on",          # Apex Trigger -> SObject
     "queries",              # SOQL site -> SObject
     "dml_operates_on",      # DML site -> SObject
+    "method_of",            # Apex method -> its class (membership; mirrors field_of)
+    "calls",                # Apex method -> Apex method (intra/cross-file call)
 
     # Flow
     "flow_invokes",         # Flow ApexAction -> Apex class

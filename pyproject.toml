@@ -73,6 +73,13 @@ sql = ["tree-sitter-sql"]
 # avoids breaking the default `uv tool install graphifyy` for everyone (#1104).
 dm = ["tree-sitter-dm"]
 terraform = ["tree-sitter-hcl"]
+# Apex tree-sitter grammar for the SF parser. No PyPI wheel exists, so this is
+# our own binding vendored under vendor/tree-sitter-apex (built from the MIT
+# aheber/tree-sitter-sfapex grammar). Like `dm`, it compiles C from source and
+# needs a C toolchain, so it is kept optional and out of the default install.
+# On Windows without MSVC, build with: pip install --config-settings=... or
+# `python setup.py build_ext --compiler=mingw32` (see vendor/tree-sitter-apex/README.md).
+apex = ["tree-sitter-apex"]
 all = ["mcp", "neo4j", "falkordb", "pypdf", "markdownify", "watchdog", "graspologic; python_version < '3.13'", "python-docx", "openpyxl", "faster-whisper; python_version >= '3.11'", "yt-dlp", "matplotlib", "numpy>=2.0; python_version >= '3.13'", "openai", "tiktoken", "boto3", "anthropic", "tree-sitter-sql", "jieba", "tree-sitter-dm", "tree-sitter-hcl"]
 
 [project.scripts]
@@ -105,6 +112,12 @@ dev = [
 # Install via: uv tool install graphify-sfdx
 # Run without installing: uvx --from graphify-sfdx graphify sf --help
 package = true
+
+[tool.uv.sources]
+# tree-sitter-apex has no PyPI release yet; resolve the `apex` extra from the
+# vendored binding in-repo. Swap this for a version pin once the wheel is
+# published (Phase C). See vendor/tree-sitter-apex/README.md.
+tree-sitter-apex = { path = "vendor/tree-sitter-apex", editable = false }
 
 [tool.setuptools]
 # graphify.salesforce MUST be listed explicitly — the previous ["graphify"] omitted

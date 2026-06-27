@@ -37,3 +37,5 @@ scripts/llm.py
 scripts/benchmark_kimi*.json
 scripts/benchmark_kimi*.py
 paper/
+
+.sfdx
