@@ -95,6 +95,10 @@ _NON_SOBJECT_TYPES = frozenset(
 #: DML keywords matched for parity with the regex parser (insert/update/delete).
 _DML_KEYWORDS = frozenset({"insert", "update", "delete"})
 
+#: Apex access modifiers, in narrowest->widest order. The narrowest one declared
+#: on a member wins as its ``sf_scope`` (an Apex member has at most one of these).
+_ACCESS_MODIFIERS = ("private", "protected", "public", "global")
+
 
 # ---------------------------------------------------------------------------
 # Small AST helpers
@@ -121,6 +125,22 @@ def _first_identifier(node, source: bytes) -> str | None:
         if c.type == "identifier":
             return _text(c, source)
     return None
+
+
+def _scope(decl_node) -> str:
+    """Return the declared access modifier for a class/method/interface node.
+
+    Reads the ``modifiers`` child and returns the first of
+    ``private``/``protected``/``public``/``global`` found. Apex defaults an
+    un-annotated member to ``private``, so that is the fallback when no access
+    modifier is present (matches the language's implicit visibility).
+    """
+    modifiers = _named_child_of_type(decl_node, "modifiers")
+    if modifiers is not None:
+        for m in _walk(modifiers):
+            if m.type in _ACCESS_MODIFIERS:
+                return m.type
+    return "private"
 
 
 def _in_loop(node) -> bool:
@@ -341,6 +361,8 @@ def extract_apex(path: Path) -> dict:
             "file_type": "code",
             "source_file": str(path),
             "sf_code_type": code_type,
+            # Access scope (public/private/protected/global) of the type itself.
+            "sf_scope": _scope(definition),
             # ORIGINAL source kept verbatim for CPQ / governor passes.
             "source": source.decode("utf-8", errors="replace"),
         }
@@ -388,6 +410,9 @@ def extract_apex(path: Path) -> dict:
                 "source_file": str(path),
                 "sf_return_type": return_type,
                 "sf_method_type": "method",
+                # Access scope (public/private/protected/global); defaults to
+                # private when un-annotated, matching Apex implicit visibility.
+                "sf_scope": _scope(n),
                 # Method body kept so the recursion-guard scan (governor SF-4,
                 # ADR-027) can detect guard patterns on method-level call cycles.
                 "source": _text(n, source),

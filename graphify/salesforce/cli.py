@@ -2,7 +2,7 @@
 graphify-sf: ``graphify sf`` command-line interface.
 
 Subcommands:
-    extract <path> [--output-dir] [--cpq-data] [--no-ooe] [--no-fields]   build + enrich an SF graph.json
+    extract <path> [--output-dir] [--cpq-data] [--no-ooe] [--no-fields] [--no-same-class-calls]   build + enrich an SF graph.json
     cluster-only [path] [--graph]               re-cluster an existing SF graph.json (SF-safe)
     serve <graph.json>                           run the base MCP server
     impact <node> [--direction] [--depth]        impact traversal
@@ -13,6 +13,7 @@ Subcommands:
 
     --no-fields            supresses generation of the field nodes in the graph
     --no-ooe               supresses generation of the order of execution nodes in the graph
+    --no-same-class-calls  only adds `calls` links between classes (drops intra-class method calls)
 
 Use ``graphify-sfdx cluster-only`` instead of the base ``graphify cluster-only`` — the base
 command runs in a separate Python environment that may not have SF file types whitelisted,
@@ -54,7 +55,13 @@ def _cmd_extract(args: argparse.Namespace) -> int:
 
     out_dir = Path(args.output_dir)
     print(f"🚀 Extracting {args.path}")
-    extraction = extract_sf(args.path, cpq_data_dir=args.cpq_data, ooe=not args.no_ooe, fields=not args.no_fields)
+    extraction = extract_sf(
+        args.path,
+        cpq_data_dir=args.cpq_data,
+        ooe=not args.no_ooe,
+        fields=not args.no_fields,
+        no_same_class_calls=args.no_same_class_calls,
+    )
     G = build_sf_graph(extraction)
     graph_file = write_sf_graph(G, out_dir / "graph.json")
 
@@ -192,6 +199,9 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="skip Order of Execution chain generation (smaller graph)")
     pe.add_argument("--no-fields", action="store_true", default=False,
                     help="strip field nodes and their edges from the graph (smaller graph)")
+    pe.add_argument("--no-same-class-calls", dest="no_same_class_calls",
+                    action="store_true", default=False,
+                    help="only link calls between classes; drop intra-class method->method calls")
     pe.set_defaults(func=_cmd_extract)
 
     pco = sub.add_parser("cluster-only", help="re-cluster an existing SF graph.json (SF-safe, use instead of base graphify cluster-only)")
@@ -246,6 +256,27 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _force_utf8_output() -> None:
+    """Make stdout/stderr tolerate the emoji / non-ASCII the CLI prints.
+
+    On Windows the console encoding is often a legacy code page (cp1252), so a
+    ``print("🚀 …")`` raises ``UnicodeEncodeError`` and aborts the command. We
+    switch the streams to UTF-8 where supported (Python 3.7+), and fall back to a
+    ``backslashreplace`` error handler so any remaining un-encodable character is
+    escaped rather than crashing the run. Best-effort: never fatal itself.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (ValueError, OSError):
+            # Stream already detached / not reconfigurable — leave it as-is.
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_output()
     args = _build_parser().parse_args(argv)
     return args.func(args)

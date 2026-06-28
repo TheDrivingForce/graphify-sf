@@ -308,6 +308,65 @@ def test_apex_cross_file_calls_resolve(tmp_path: Path) -> None:
     assert all("sf_unresolved_calls" not in n for n in nodes)
 
 
+def test_apex_scope_attribute(tmp_path: Path) -> None:
+    """Classes and methods carry their access scope as ``sf_scope``.
+
+    The modifier (public/private/protected/global) is read for the type and each
+    method; an un-annotated method falls back to Apex-implicit ``private``.
+    """
+    cls = tmp_path / "Scoped.cls"
+    cls.write_text(
+        "public with sharing class Scoped {\n"
+        "    global static void doGlobal() {}\n"
+        "    protected void doProtected() {}\n"
+        "    private void doPrivate() {}\n"
+        "    Integer implicit() { return 1; }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    res = extract_apex_enhanced(cls)
+    by_id = {n["id"]: n for n in res["nodes"]}
+
+    assert by_id["apex_scoped"]["sf_scope"] == "public"
+    assert by_id["apex_scoped_doglobal"]["sf_scope"] == "global"
+    assert by_id["apex_scoped_doprotected"]["sf_scope"] == "protected"
+    assert by_id["apex_scoped_doprivate"]["sf_scope"] == "private"
+    # No access modifier -> Apex-implicit private.
+    assert by_id["apex_scoped_implicit"]["sf_scope"] == "private"
+
+
+def test_no_same_class_calls_drops_intra_class_edges(tmp_path: Path) -> None:
+    """``--no-same-class-calls`` keeps only inter-class ``calls`` edges.
+
+    ``A.run`` calls a same-class ``helper()`` and a cross-class ``B.go()``.
+    Without the flag both ``calls`` edges exist; with it only the A->B edge
+    survives.
+    """
+    (tmp_path / "A.cls").write_text(
+        "public class A {\n"
+        "    public void run() { helper(); B.go(); }\n"
+        "    private void helper() {}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "B.cls").write_text(
+        "public class B {\n"
+        "    public static void go() {}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    full = extract_sf(tmp_path)
+    calls = {(e["source"], e["target"]) for e in full["edges"] if e["relation"] == "calls"}
+    assert ("apex_a_run", "apex_a_helper") in calls  # intra-class
+    assert ("apex_a_run", "apex_b_go") in calls  # inter-class
+
+    filtered = extract_sf(tmp_path, no_same_class_calls=True)
+    calls2 = {(e["source"], e["target"]) for e in filtered["edges"] if e["relation"] == "calls"}
+    assert ("apex_a_run", "apex_a_helper") not in calls2  # dropped
+    assert ("apex_a_run", "apex_b_go") in calls2  # kept
+
+
 def test_apex_guarded_recursion_downgraded(tmp_path: Path) -> None:
     """A guarded mutual-recursion cycle is reported but downgraded to LOW.
 

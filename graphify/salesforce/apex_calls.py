@@ -114,6 +114,43 @@ def _pick(candidates: list[tuple[str, int]], arity: int) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
+def drop_same_class_calls(all_nodes: list[dict], all_edges: list[dict]) -> None:
+    """Remove ``calls`` edges whose caller and callee live in the same Apex class.
+
+    Implements the ``--no-same-class-calls`` option: when set, the graph keeps
+    only *inter-class* call links, dropping intra-class method->method calls so
+    the call graph shows the relationships *between* classes rather than each
+    class's internal control flow. Mutates ``all_edges`` in place.
+
+    Only Apex method->method ``calls`` edges are considered. An edge is dropped
+    when both endpoints resolve to the same owning class node id; calls whose
+    endpoints belong to different classes (or that we cannot attribute to a
+    class) are kept.
+    """
+    class_label_by_id: dict[str, str] = {
+        n["id"]: (n.get("label") or "").lower()
+        for n in all_nodes
+        if n.get("file_type") == "code"
+        and n.get("sf_code_type") in ("class", "trigger", "interface")
+    }
+    # Owning class id for each method node, resolved once.
+    owner_by_method: dict[str, str] = {
+        n["id"]: _owner_class_id(n["id"], class_label_by_id)
+        for n in all_nodes
+        if n.get("sf_method_type") == "method"
+    }
+
+    def _same_class(edge: dict) -> bool:
+        if edge.get("relation") != "calls":
+            return False
+        src_owner = owner_by_method.get(edge.get("source"))
+        tgt_owner = owner_by_method.get(edge.get("target"))
+        # Both endpoints must be attributable to the SAME, non-empty class.
+        return bool(src_owner) and src_owner == tgt_owner
+
+    all_edges[:] = [e for e in all_edges if not _same_class(e)]
+
+
 def resolve_apex_calls(all_nodes: list[dict], all_edges: list[dict]) -> list[dict]:
     """Resolve deferred Apex->Apex call sites into ``calls`` edges.
 

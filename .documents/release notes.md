@@ -1,5 +1,23 @@
 # Release Notes
 
+## 2026-06-28 18:26
+
+### New Features
+
+#### Method / class access scope on Apex nodes (`sf_scope`)
+
+Apex class, trigger, interface, and method nodes now carry an `sf_scope` attribute holding the declared access modifier (`public` / `private` / `protected` / `global`). An un-annotated method falls back to `private`, matching Apex's implicit visibility. Scope is read from the AST in the tree-sitter parser (`apex_ts.py`) and from the modifier regexes in the fallback parser (`apex_enhanced.py`), so both paths emit the attribute.
+
+#### `--no-same-class-calls` extract flag
+
+New `graphify sf extract --no-same-class-calls` option restricts Apex `calls` edges to **inter-class** links only — intra-class method→method calls are dropped, so the call graph shows relationships *between* classes rather than each class's internal control flow. The filter runs after cross-file call resolution (`drop_same_class_calls` in `apex_calls.py`), so downstream passes (recursion detection) operate on the filtered edge set. Threaded through `extract_sf(no_same_class_calls=...)`.
+
+### Fixes
+
+#### CLI no longer crashes on non-UTF-8 consoles
+
+`graphify sf` commands print status emoji (🚀 / ✅ / 💾) and other non-ASCII characters. On Windows the console is often a legacy code page (cp1252), where these raised `UnicodeEncodeError` and aborted the command (notably `extract`). `main()` now reconfigures stdout/stderr to UTF-8 with a `backslashreplace` fallback (`_force_utf8_output` in `cli.py`), so commands run cleanly regardless of console encoding — no `PYTHONIOENCODING=utf-8` workaround needed.
+
 ## 2026-06-27 22:09
 
 ### New Features

@@ -44,6 +44,12 @@ from graphify.salesforce.constants import (
 #: naive ``(?:public|private)?\s+`` form misses it.
 _DEFINITION_RE = re.compile(r"\b(class|trigger)\s+(\w+)", re.IGNORECASE)
 
+#: Access modifier preceding a ``class`` keyword, captured separately so the
+#: anchored ``_DEFINITION_RE`` above still matches modifier-less declarations.
+_CLASS_SCOPE_RE = re.compile(
+    r"\b(public|private|protected|global)\b[^{;]*?\bclass\b", re.IGNORECASE
+)
+
 #: Method signature. A visibility modifier is REQUIRED to avoid matching control
 #: flow (``else if (...)``, ``for (...)``) as methods. Captures return type,
 #: name and the raw parameter list.
@@ -297,6 +303,11 @@ def _extract_apex_regex(path: Path) -> dict:
     class_name = definition.group(2)
     class_id = f"apex_{path.stem.lower()}"
 
+    # Access scope: a modifier before the class keyword, else Apex-implicit private.
+    # Triggers have no access modifier; default private is harmless for them.
+    scope_match = _CLASS_SCOPE_RE.search(scan)
+    class_scope = scope_match.group(1).lower() if scope_match else "private"
+
     nodes.append(
         {
             "id": class_id,
@@ -304,13 +315,15 @@ def _extract_apex_regex(path: Path) -> dict:
             "file_type": "code",
             "source_file": str(path),
             "sf_code_type": "trigger" if code_type == "trigger" else "class",
+            "sf_scope": class_scope,
             "source": source,  # kept for CPQ / governor passes
         }
     )
 
     # 2. Method signatures ------------------------------------------------
     for method in _METHOD_RE.finditer(scan):
-        return_type, method_name, params = (
+        scope, return_type, method_name, params = (
+            method.group(1).lower(),
             method.group(2),
             method.group(3),
             method.group(4),
@@ -324,6 +337,7 @@ def _extract_apex_regex(path: Path) -> dict:
                 "source_file": str(path),
                 "sf_return_type": return_type,
                 "sf_method_type": "method",
+                "sf_scope": scope,
             }
         )
         edges.append(

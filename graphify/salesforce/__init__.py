@@ -201,7 +201,15 @@ def _strip_fields(all_nodes: list[dict], all_edges: list[dict]) -> None:
     ]
 
 
-def extract_sf(path, *, cpq_data_dir=None, ooe: bool = True, fields: bool = True, **kwargs):
+def extract_sf(
+    path,
+    *,
+    cpq_data_dir=None,
+    ooe: bool = True,
+    fields: bool = True,
+    no_same_class_calls: bool = False,
+    **kwargs,
+):
     """Extract a Salesforce repository into a knowledge graph.
 
     Dispatches every supported Salesforce file under ``path`` to its parser,
@@ -241,12 +249,16 @@ def extract_sf(path, *, cpq_data_dir=None, ooe: bool = True, fields: bool = True
             analysis passes complete. Useful when field-level detail is not needed
             and a smaller graph is preferred. Passes still run with fields present
             so CPQ/validation overlap analysis is unaffected.
+        no_same_class_calls: If ``True``, drop Apex ``calls`` edges whose caller and
+            callee belong to the same class, keeping only inter-class call links.
+            Applied after cross-file call resolution so downstream passes
+            (recursion detection) see the filtered set.
         **kwargs: Reserved for future options (neo4j-uri, …); currently ignored.
 
     Returns:
         ``{"nodes": [...], "edges": [...]}`` — the merged, analyzed graph.
     """
-    from .apex_calls import resolve_apex_calls
+    from .apex_calls import drop_same_class_calls, resolve_apex_calls
     from .cpq import cpq_analysis_pass
     from .flow_cpq_loops import detect_flow_cpq_loops
     from .mdt_mapping import mdt_mapping_pass
@@ -312,6 +324,10 @@ def extract_sf(path, *, cpq_data_dir=None, ooe: bool = True, fields: bool = True
     # `calls` edges feed cycle enumeration (ADR-027). Intra-file calls were
     # already emitted by the parser.
     all_edges.extend(resolve_apex_calls(all_nodes, all_edges))
+    # Optionally keep only inter-class call links (--no-same-class-calls): drop
+    # intra-class method->method calls before downstream passes consume them.
+    if no_same_class_calls:
+        drop_same_class_calls(all_nodes, all_edges)
     all_edges.extend(governor_limit_analysis_pass(all_nodes, all_edges))
     all_edges.extend(detect_recursive_triggers(all_nodes, all_edges))
     all_edges.extend(permission_analysis_pass(all_nodes, all_edges))
