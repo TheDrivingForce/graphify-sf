@@ -33,6 +33,8 @@ SF_NODE_TYPE_TO_NEO4J_LABEL: dict[str, str] = {
     "sobject": "SObject",
     "flow": "Flow",
     "lwc_component": "LWCComponent",
+    "lwc_controller": "LWCController",
+    "lwc_template": "LWCTemplate",
     "cpq_rule": "CPQRule",
     "cpq_qcp_method": "CPQQCPMethod",
     "profile": "Profile",
@@ -54,7 +56,12 @@ SF_RELATION_TO_NEO4J_TYPE: dict[str, str] = {
     "flow_invokes": "FLOW_INVOKES",
     # LWC
     "wire_to": "WIRE_TO",
+    "lwc_calls": "LWC_CALLS",
     "embeds": "EMBEDS",
+    "part_of": "PART_OF",
+    "imports": "IMPORTS",
+    "member_of": "MEMBER_OF",
+    "instantiates": "INSTANTIATES",
     # Permission
     "grants_access_to": "GRANTS_ACCESS_TO",
     "field_of": "FIELD_OF",

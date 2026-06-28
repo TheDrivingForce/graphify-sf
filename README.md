@@ -43,8 +43,8 @@ consumption → onboarding, analysis, impact review, and development.**
   self-contained HTML visualization.
 
 Every node/edge carries a `confidence` (EXTRACTED / INFERRED / AMBIGUOUS) so you know
-what is certain vs. heuristic. See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md),
-[`docs/ADR.md`](./docs/ADR.md), and [`docs/PRD.md`](./docs/PRD.md).
+what is certain vs. heuristic. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) and the
+local decision log [`.documents/ADR.md`](./.documents/ADR.md).
 
 ## Install
 

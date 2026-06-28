@@ -151,6 +151,72 @@ def drop_same_class_calls(all_nodes: list[dict], all_edges: list[dict]) -> None:
     all_edges[:] = [e for e in all_edges if not _same_class(e)]
 
 
+def resolve_apex_refs(all_nodes: list[dict], all_edges: list[dict]) -> list[dict]:
+    """Resolve deferred ``new X()`` type references into ``instantiates`` edges.
+
+    Reads ``sf_unresolved_refs`` off class nodes (set by ``apex_ts``) and links the
+    constructing class to the constructed class. This is what keeps pure DTO /
+    wrapper classes — no methods, default constructor, never the target of a
+    ``calls`` edge — from being orphaned in the graph.
+
+    Resolution is conservative, mirroring ``resolve_apex_calls``: a type name is
+    linked only when exactly one Apex class declares that label. Ambiguous names
+    (same label on multiple classes) are skipped rather than guessed. The
+    ``sf_unresolved_refs`` metadata is cleared from the nodes. Caller does
+    ``all_edges.extend(resolve_apex_refs(...))``.
+    """
+    # Index class/trigger/interface nodes by lowered label. A label can in
+    # principle repeat (two files, same class name) — keep the candidate list so
+    # ambiguous names resolve to no edge.
+    class_ids_by_label: dict[str, list[str]] = {}
+    for n in all_nodes:
+        if n.get("file_type") == "code" and n.get("sf_code_type") in (
+            "class",
+            "trigger",
+            "interface",
+        ):
+            label = (n.get("label") or "").lower()
+            if label:
+                class_ids_by_label.setdefault(label, []).append(n["id"])
+
+    existing = {
+        (e.get("source"), e.get("target"))
+        for e in all_edges
+        if e.get("relation") == "instantiates"
+    }
+    new_edges: list[dict] = []
+
+    for node in all_nodes:
+        pending = node.pop("sf_unresolved_refs", None)
+        if not pending:
+            continue
+        for ref in pending:
+            caller_id = ref["caller_id"]
+            type_name = (ref.get("type_name") or "").lower()
+            candidates = class_ids_by_label.get(type_name, [])
+            if len(candidates) != 1:
+                continue  # unknown or ambiguous — skip, don't guess
+            target_id = candidates[0]
+            if target_id == caller_id:
+                continue
+            if (caller_id, target_id) in existing:
+                continue
+            existing.add((caller_id, target_id))
+            new_edges.append(
+                {
+                    "source": caller_id,
+                    "target": target_id,
+                    "relation": "instantiates",
+                    "context": "new",
+                    "confidence": "EXTRACTED",
+                    "source_location": ref.get("source_location", ""),
+                    "source_file": ref.get("source_file", ""),
+                }
+            )
+
+    return new_edges
+
+
 def resolve_apex_calls(all_nodes: list[dict], all_edges: list[dict]) -> list[dict]:
     """Resolve deferred Apex->Apex call sites into ``calls`` edges.
 

@@ -192,6 +192,37 @@ def _type_element_name(type_node, source: bytes) -> str | None:
     return None
 
 
+def _constructed_type_name(creation_node, source: bytes) -> str | None:
+    """Return the user-class type name of an ``object_creation_expression``.
+
+    ``new TranslationResponse()`` -> ``TranslationResponse``. Returns ``None`` for
+    constructions whose type is not a candidate Apex *class* link:
+
+      - collection containers (``new List<X>()``, ``new Map<K,V>()``) — the
+        ``generic_type`` container is a builtin; its element type, if a class, is
+        picked up where the element itself is constructed/used, not here.
+      - primitives / system builtins (``new String()``-like) via ``_NON_SOBJECT_TYPES``.
+      - dotted types (``new Foo.Bar()``) — inner classes are out of scope here.
+
+    The grammar shape is ``new <type> <arguments>`` where ``<type>`` is the first
+    named child after the ``new`` keyword.
+    """
+    type_node = None
+    for c in creation_node.children:
+        if c.type in ("type_identifier", "scoped_type_identifier", "generic_type"):
+            type_node = c
+            break
+    if type_node is None:
+        return None
+    # Collection containers and scoped/dotted types are not direct class links.
+    if type_node.type != "type_identifier":
+        return None
+    name = _text(type_node, source)
+    if not name or name in _NON_SOBJECT_TYPES:
+        return None
+    return name
+
+
 def _build_var_types(root, source: bytes) -> dict[str, str]:
     """Map local/parameter variable names to their declared (SObject) type.
 
@@ -543,6 +574,37 @@ def extract_apex(path: Path) -> dict:
                     _unresolved(caller_id, receiver_type, callee, arity, n, path)
                 )
 
+    # 4.6 Apex -> Apex type references via `new X()` (Phase B) ------------
+    # A `new TypeName()` instantiation references a class even when no method is
+    # called on it — pure DTO / wrapper classes (no methods, default ctor) would
+    # otherwise be orphaned. We collect the constructed type name and defer
+    # resolution to the SF-wide `resolve_apex_refs` pass (target class is almost
+    # always in another file). Collection containers (List/Set/Map) and other
+    # non-class builtins are skipped; the constructed element type is what links.
+    unresolved_refs: list[dict] = []
+    seen_refs: set[str] = set()
+    for n in _walk(root):
+        if n.type != "object_creation_expression":
+            continue
+        type_name = _constructed_type_name(n, source)
+        if not type_name:
+            continue
+        # Skip self-references and obvious builtins.
+        if type_name.lower() == class_name.lower():
+            continue
+        key = type_name.lower()
+        if key in seen_refs:
+            continue
+        seen_refs.add(key)
+        unresolved_refs.append(
+            {
+                "caller_id": class_id,
+                "type_name": type_name,
+                "source_location": f"L{_line(n)}",
+                "source_file": str(path),
+            }
+        )
+
     # 5. Implements (QCP / Batchable hint) --------------------------------
     implements = _implements_text(definition, source)
     if (
@@ -577,6 +639,8 @@ def extract_apex(path: Path) -> dict:
     # node/edge merge in extract_sf; `resolve_apex_calls` consumes and clears them.
     if unresolved_calls:
         nodes[0]["sf_unresolved_calls"] = unresolved_calls
+    if unresolved_refs:
+        nodes[0]["sf_unresolved_refs"] = unresolved_refs
 
     return {"nodes": nodes, "edges": edges}
 

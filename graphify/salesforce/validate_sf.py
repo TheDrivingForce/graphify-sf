@@ -27,7 +27,9 @@ import networkx as nx
 SF_FILE_TYPES = {
     "sobject",          # Salesforce Object (Account, SBQQ__Quote__c, …)
     "flow",             # Flow / Process Builder
-    "lwc_component",    # Lightning Web Component
+    "lwc_component",    # Lightning Web Component (bundle node, one per folder)
+    "lwc_controller",   # One JS file within an LWC bundle (part_of the bundle)
+    "lwc_template",     # One HTML template within an LWC bundle (part_of the bundle)
     "profile",          # Profile (user permissions)
     "permission_set",   # Permission Set
     "cpq_rule",         # CPQ Price/Product Rule object
@@ -64,6 +66,11 @@ SF_RELATIONS = {
     # LWC
     "wire_to",              # LWC @wire -> Apex method
     "lwc_calls",            # LWC imperative @salesforce/apex import -> Apex method
+    "part_of",              # LWC JS/HTML file -> its bundle component node
+    "embeds",               # LWC HTML file -> embedded child LWC bundle (c- tag)
+    "imports",              # LWC JS file -> imported c/ module bundle
+    "member_of",            # Exported LWC function -> its bundle component
+    "instantiates",         # Apex class -> class constructed via `new X()`
 
     # Permission
     "grants_access_to",     # Profile/PermSet -> Object/Field

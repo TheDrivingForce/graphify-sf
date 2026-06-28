@@ -161,34 +161,46 @@ def _merge_into(all_nodes, node_by_id, node):
 
 
 def _merge_lwc_components(all_nodes, all_edges):
-    """LWC merge pass (Pass SF-2 / ADR-008): fold each ``*.html`` template node
-    into its sibling ``*.js`` controller node so one ``lwc_component`` node
-    remains per component.
+    """LWC bundle pass (Pass SF-2 / ADR-008): tag bundle nodes from their parts.
 
-    The HTML parser emits ``lwc_<stem>_html``; the JS parser emits ``lwc_<stem>``.
-    When both exist we keep the JS node (it carries the ``@wire`` / ``@api``
-    signal) and drop the HTML node, tagging the survivor ``sf_has_template``.
-    A template-only component is promoted to the base ID so it is still a single
-    ``lwc_component`` node.
+    An LWC is a *bundle* of files in a component folder: one ``lwc_component``
+    node (``lwc_<folder>``) with a ``part_of`` child node per JS file
+    (``lwc_<folder>_js_<stem>``) and per HTML template (``lwc_<folder>_html_<stem>``).
+    CSS is ignored. Supplemental JS/HTML files are first-class part_of children,
+    not folded away — this is the bundle model (multiple JS/HTML per component).
+
+    The per-file parsers already emit the file nodes, their ``part_of`` edges, and
+    a stub bundle node (deduped on merge). This pass only derives bundle-level
+    summary flags from the parts: ``sf_has_template`` when any HTML part exists,
+    and ``sf_js_file_count`` / ``sf_html_file_count`` for quick inspection.
     """
     node_by_id = {n["id"]: n for n in all_nodes}
-    html_nodes = [n for n in all_nodes if n.get("sf_lwc_file_type") == "html"]
-    for html in html_nodes:
-        html_id = html["id"]
-        base_id = html_id[: -len("_html")] if html_id.endswith("_html") else html_id
-        base = node_by_id.get(base_id)
-        if base is None or base is html:
-            # Template-only component: promote to the base ID.
-            all_nodes.remove(html)
-            html["id"] = base_id
-            html.pop("sf_lwc_file_type", None)
-            html["sf_has_template"] = True
-            node_by_id[base_id] = html
-            all_nodes.append(html)
+    js_counts: dict[str, int] = {}
+    html_counts: dict[str, int] = {}
+    for e in all_edges:
+        if e.get("relation") != "part_of":
             continue
-        base["sf_has_template"] = True
-        all_nodes.remove(html)
-        node_by_id.pop(html_id, None)
+        bundle = node_by_id.get(e.get("target"))
+        if bundle is None or bundle.get("file_type") != "lwc_component":
+            continue
+        src = node_by_id.get(e.get("source"))
+        ftype = src.get("sf_lwc_file_type") if src else None
+        if ftype == "js":
+            js_counts[bundle["id"]] = js_counts.get(bundle["id"], 0) + 1
+            # The main controller carries the authoritative component label;
+            # apply it (labels are first-wins on merge, so a kebab embeds-stub
+            # label may have landed first).
+            if src.get("sf_component_label"):
+                bundle["label"] = src["sf_component_label"]
+        elif ftype == "html":
+            html_counts[bundle["id"]] = html_counts.get(bundle["id"], 0) + 1
+
+    for bundle_id, count in html_counts.items():
+        node = node_by_id[bundle_id]
+        node["sf_has_template"] = True
+        node["sf_html_file_count"] = count
+    for bundle_id, count in js_counts.items():
+        node_by_id[bundle_id]["sf_js_file_count"] = count
 
 
 def _strip_fields(all_nodes: list[dict], all_edges: list[dict]) -> None:
@@ -258,7 +270,7 @@ def extract_sf(
     Returns:
         ``{"nodes": [...], "edges": [...]}`` — the merged, analyzed graph.
     """
-    from .apex_calls import drop_same_class_calls, resolve_apex_calls
+    from .apex_calls import drop_same_class_calls, resolve_apex_calls, resolve_apex_refs
     from .cpq import cpq_analysis_pass
     from .flow_cpq_loops import detect_flow_cpq_loops
     from .mdt_mapping import mdt_mapping_pass
@@ -324,6 +336,9 @@ def extract_sf(
     # `calls` edges feed cycle enumeration (ADR-027). Intra-file calls were
     # already emitted by the parser.
     all_edges.extend(resolve_apex_calls(all_nodes, all_edges))
+    # Link `new X()` instantiations so pure DTO / wrapper classes (no methods,
+    # never the target of a `calls` edge) are not orphaned.
+    all_edges.extend(resolve_apex_refs(all_nodes, all_edges))
     # Optionally keep only inter-class call links (--no-same-class-calls): drop
     # intra-class method->method calls before downstream passes consume them.
     if no_same_class_calls:

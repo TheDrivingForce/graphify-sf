@@ -308,6 +308,52 @@ def test_apex_cross_file_calls_resolve(tmp_path: Path) -> None:
     assert all("sf_unresolved_calls" not in n for n in nodes)
 
 
+def test_apex_dto_instantiation_links(tmp_path: Path) -> None:
+    """``resolve_apex_refs`` links ``new X()`` so pure DTO classes aren't orphaned.
+
+    A wrapper class with no methods (default constructor) is referenced only by
+    ``new TranslationResponse()`` in a consumer. The SF-wide refs pass emits an
+    ``instantiates`` edge; collection containers (``new List<...>()``) and
+    builtins (``new String()``) are not linked.
+    """
+    from graphify.salesforce.apex_calls import resolve_apex_refs
+
+    dto = tmp_path / "TranslationResponse.cls"
+    dto.write_text(
+        "public class TranslationResponse {\n"
+        "    public String translatedText;\n"
+        "    public Boolean success;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    consumer = tmp_path / "Consumer.cls"
+    consumer.write_text(
+        "public class Consumer {\n"
+        "    public void run() {\n"
+        "        TranslationResponse tr = new TranslationResponse();\n"
+        "        List<TranslationResponse> all = new List<TranslationResponse>();\n"
+        "        String s = new String();\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    for f in (dto, consumer):
+        res = extract_apex_enhanced(f)
+        nodes += res["nodes"]
+        edges += res["edges"]
+
+    new_edges = resolve_apex_refs(nodes, edges)
+    links = {(e["source"], e["target"], e["relation"]) for e in new_edges}
+    assert ("apex_consumer", "apex_translationresponse", "instantiates") in links
+    # The collection container / builtin constructions invent no class link.
+    assert all(t != "apex_string" for _s, t, _r in links)
+    # Metadata is cleared off the nodes after resolution.
+    assert all("sf_unresolved_refs" not in n for n in nodes)
+
+
 def test_apex_scope_attribute(tmp_path: Path) -> None:
     """Classes and methods carry their access scope as ``sf_scope``.
 
@@ -467,14 +513,17 @@ def test_flow_parser() -> None:
 
 
 def test_lwc_parser() -> None:
-    # --- HTML template ---------------------------------------------------
-    html_result = extract_lwc_html(FIXTURES / "sf_MyComponent.html")
+    # Bundle model: component identity is the FOLDER (``myComponent``), so both
+    # files resolve to the bundle id ``lwc_mycomponent`` with their own file nodes.
+    bundle_id = "lwc_mycomponent"
+    lwc_dir = FIXTURES / "lwc" / "myComponent"
 
-    # 1. No error. ``embeds`` edges are sourced from the post-merge BASE id
-    #    (lwc_<stem>), which the HTML parser alone doesn't emit — that node is
-    #    supplied by the JS sibling / merge pass — so they look "dangling" in
-    #    isolation by design. Their *targets* (child stubs) must resolve, and
-    #    the survives-the-merge invariant is covered by the full-org test.
+    # --- HTML template ---------------------------------------------------
+    html_result = extract_lwc_html(lwc_dir / "myComponent.html")
+
+    # 1. No error. The HTML file node + its part_of edge resolve in isolation;
+    #    ``embeds`` targets (child bundle stubs) resolve too. The cross-file
+    #    survives-the-merge invariant is covered by the full-org test.
     assert "error" not in html_result
     _assert_no_dangling_edges(
         {
@@ -487,57 +536,69 @@ def test_lwc_parser() -> None:
     }
     assert _embed_targets <= {n["id"] for n in html_result["nodes"]}
 
-    html_sidecar = [
-        n for n in html_result["nodes"] if n.get("sf_lwc_file_type") == "html"
-    ]
-    assert len(html_sidecar) == 1
+    # The HTML file gets its own node (part_of the bundle), and the main template
+    # is flagged. The bundle node is also emitted (stub) so part_of resolves.
+    html_file_id = f"{bundle_id}_html_mycomponent"
+    html_file = next(n for n in html_result["nodes"] if n["id"] == html_file_id)
+    assert html_file["file_type"] == "lwc_template"
+    assert html_file["sf_main_template"] is True
+    assert any(
+        e["source"] == html_file_id
+        and e["target"] == bundle_id
+        and e["relation"] == "part_of"
+        for e in html_result["edges"]
+    )
 
-    # 2. <c-...> embeds -> embeds edges (LWC -> child LWC). Sourced from the
-    #    BASE component id (lwc_<stem>), NOT the _html sidecar, so they survive
-    #    the merge pass. Base/standard tags (lightning-button) and duplicate
-    #    child tags do NOT produce extra edges. (Fixture stem is "sf_MyComponent"
-    #    -> base id "lwc_sf_mycomponent".)
+    # 2. <c-...> embeds -> embeds edges, sourced from the HTML FILE node to each
+    #    child BUNDLE. Base/standard tags (lightning-button) and duplicate child
+    #    tags do NOT produce extra edges.
     embeds = [e for e in html_result["edges"] if e["relation"] == "embeds"]
     assert {e["target"] for e in embeds} == {
         "lwc_accountlist",
         "lwc_badgesection",
         "lwc_statusicon",
     }
-    assert all(e["source"] == "lwc_sf_mycomponent" for e in embeds)
+    assert all(e["source"] == html_file_id for e in embeds)
     assert all(e["confidence"] == "EXTRACTED" for e in embeds)
     # c-account-list appears twice in the template -> exactly one edge.
     assert len([e for e in embeds if e["target"] == "lwc_accountlist"]) == 1
-    # Child stubs emitted (no dangling edges) and carry the original tag.
-    assert {n["id"] for n in html_result["nodes"] if n["id"].startswith("lwc_")} >= {
-        "lwc_accountlist",
-        "lwc_badgesection",
-        "lwc_statusicon",
-    }
     assert any(e.get("sf_embedded_tag") == "c-account-list" for e in embeds)
 
     # --- JavaScript ------------------------------------------------------
-    js_result = extract_lwc_js(FIXTURES / "sf_MyComponent.js")
+    js_result = extract_lwc_js(lwc_dir / "myComponent.js")
 
     # 1. No error + no dangling edges
     assert "error" not in js_result
     _assert_no_dangling_edges(js_result)
 
-    lwc_nodes = [n for n in js_result["nodes"] if n["file_type"] == "lwc_component"]
-    assert len(lwc_nodes) == 1
-    lwc_node = lwc_nodes[0]
-    assert lwc_node["label"] == "MyComponent"
-    assert lwc_node["sf_lwc_file_type"] == "js"
+    # The bundle node carries the component identity; the main controller
+    # promotes its label to the class name. The JS file is a part_of child.
+    bundle_node = next(
+        n for n in js_result["nodes"]
+        if n["id"] == bundle_id and n["file_type"] == "lwc_component"
+    )
+    assert bundle_node["label"] == "MyComponent"
+    js_file_id = f"{bundle_id}_js_mycomponent"
+    js_file = next(n for n in js_result["nodes"] if n["id"] == js_file_id)
+    assert js_file["file_type"] == "lwc_controller"
+    assert js_file["sf_main_controller"] is True
+    assert any(
+        e["source"] == js_file_id
+        and e["target"] == bundle_id
+        and e["relation"] == "part_of"
+        for e in js_result["edges"]
+    )
 
-    # 4. @api properties detected
-    assert lwc_node["sf_api_property_recordId"] is True
-    assert lwc_node["sf_api_property_label"] is True
+    # 4. @api properties detected -> on the JS FILE node that declares them.
+    assert js_file["sf_api_property_recordId"] is True
+    assert js_file["sf_api_property_label"] is True
 
-    # 2. @wire to an Apex method -> wire_to edge. @wire to getRecord (UI-API)
-    #    must NOT produce an edge.
+    # 2. @wire to an Apex method -> wire_to edge, sourced from the JS file node.
+    #    @wire to getRecord (UI-API) must NOT produce an edge.
     wire_edges = [e for e in js_result["edges"] if e["relation"] == "wire_to"]
     assert len(wire_edges) == 1
     w = wire_edges[0]
-    assert w["source"] == lwc_node["id"]
+    assert w["source"] == js_file_id
     # Resolves to the same Apex method node ID the Apex parser produces:
     # apex_<class>_<method>  (AccountService.getAccounts)
     assert w["target"] == "apex_accountservice_getaccounts"
@@ -545,13 +606,87 @@ def test_lwc_parser() -> None:
     assert w["confidence"] == "INFERRED"
 
     # 3. Imperative Apex import (saveAccount, not @wire'd) -> lwc_calls edge.
-    #    This is the real-org pattern (Opportunity LWCs call Apex imperatively)
-    #    the parser previously dropped.
     calls = [e for e in js_result["edges"] if e["relation"] == "lwc_calls"]
     assert len(calls) == 1
-    assert calls[0]["source"] == lwc_node["id"]
+    assert calls[0]["source"] == js_file_id
     assert calls[0]["target"] == "apex_accountservice_saveaccount"
     assert calls[0]["sf_apex_method"] == "saveAccount"
+
+
+def test_lwc_module_imports_and_calls(tmp_path: Path) -> None:
+    """JS-only LWC service modules link via ``imports`` + ``calls`` edges.
+
+    A controller does ``import { fireActionClickEvent } from 'c/eventBookingUtils'``
+    then calls ``fireActionClickEvent(...)``. The exporting module declares the
+    function via ``export { ... }``. The parser must:
+      - model each exported function as a node (``lwc_<stem>_<fn>``),
+      - emit an ``imports`` edge consumer -> module,
+      - emit a ``calls`` edge consumer -> the specific function node,
+    with IDs that merge across the two files (cross-file resolution).
+    """
+    util_dir = tmp_path / "eventBookingUtils"
+    util_dir.mkdir()
+    (util_dir / "eventBookingUtils.js").write_text(
+        "const fireActionClickEvent = (a, b, c) => {};\n"
+        "const prepBookingData = (b) => b;\n"
+        "export { fireActionClickEvent, prepBookingData };\n",
+        encoding="utf-8",
+    )
+    cons_dir = tmp_path / "eventBookingBookerInfo"
+    cons_dir.mkdir()
+    (cons_dir / "eventBookingBookerInfo.js").write_text(
+        "import { LightningElement } from 'lwc';\n"
+        "import { fireActionClickEvent } from 'c/eventBookingUtils';\n"
+        "export default class EventBookingBookerInfo extends LightningElement {\n"
+        "    handle() { fireActionClickEvent(true, 'toggleProgressBar', this); }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    util = extract_lwc_js(util_dir / "eventBookingUtils.js")
+    cons = extract_lwc_js(cons_dir / "eventBookingBookerInfo.js")
+    _assert_no_dangling_edges(util)
+    _assert_no_dangling_edges(cons)
+
+    # Exporter: each exported name -> a function node with a member_of edge.
+    fn_id = "lwc_eventbookingutils_fireactionclickevent"
+    util_fns = {n["id"] for n in util["nodes"] if n.get("sf_lwc_function")}
+    assert fn_id in util_fns
+    assert "lwc_eventbookingutils_prepbookingdata" in util_fns
+    assert any(
+        e["source"] == fn_id
+        and e["target"] == "lwc_eventbookingutils"
+        and e["relation"] == "member_of"
+        for e in util["edges"]
+    )
+
+    # Consumer: imports edge to the module + calls edge to the called function.
+    imports = [e for e in cons["edges"] if e["relation"] == "imports"]
+    assert any(e["target"] == "lwc_eventbookingutils" for e in imports)
+    calls = [e for e in cons["edges"] if e["relation"] == "calls"]
+    assert len(calls) == 1
+    # Behavioral edges source from the JS FILE node, not the bundle.
+    assert calls[0]["source"] == "lwc_eventbookingbookerinfo_js_eventbookingbookerinfo"
+    # Target ID matches the exporter's function node -> merges across files.
+    assert calls[0]["target"] == fn_id
+    assert calls[0]["sf_lwc_function"] == "fireActionClickEvent"
+
+
+def test_lwc_module_import_unused_is_not_called(tmp_path: Path) -> None:
+    """An imported-but-never-invoked name yields ``imports`` but no ``calls``."""
+    js = tmp_path / "consumer.js"
+    js.write_text(
+        "import { prepBookingData } from 'c/eventBookingUtils';\n"
+        "export default class Consumer {}\n",
+        encoding="utf-8",
+    )
+    res = extract_lwc_js(js)
+    assert any(
+        e["relation"] == "imports" and e["target"] == "lwc_eventbookingutils"
+        for e in res["edges"]
+    )
+    # prepBookingData is imported but never called -> dependency, not a call.
+    assert not any(e["relation"] == "calls" for e in res["edges"])
 
 
 def test_profile_parser() -> None:
@@ -2088,28 +2223,37 @@ class TestExtractSF:
         )
         assert any(n.get("sf_qcp_implementation") for n in nodes_by_id)
 
-        # 5b. LWC merge pass folded html + js into one node per component
-        #     (accountList + statusBadge), each tagged with its template.
+        # 5b. LWC bundle model: one lwc_component (bundle) node per component
+        #     folder (accountList + statusBadge), each with its JS + HTML files as
+        #     part_of children. CSS is ignored.
         lwc_nodes = [n for n in nodes if n.get("file_type") == "lwc_component"]
         assert len(lwc_nodes) == 2
         assert all(n.get("sf_has_template") is True for n in lwc_nodes)
-        # html sidecar nodes were removed by the merge.
-        assert not any(n.get("sf_lwc_file_type") == "html" for n in nodes)
+        # File nodes exist and link to their bundle via part_of.
+        js_files = [n for n in nodes if n.get("file_type") == "lwc_controller"]
+        html_files = [n for n in nodes if n.get("file_type") == "lwc_template"]
+        assert js_files and html_files
+        part_of = [e for e in edges if e["relation"] == "part_of"]
+        bundle_ids = {n["id"] for n in lwc_nodes}
+        assert all(e["target"] in bundle_ids for e in part_of)
+        assert all(e["source"] in node_ids and e["target"] in node_ids
+                   for e in part_of)
 
-        # 5c. Cross-file LWC -> Apex resolution: @wire targets a real method.
+        # 5c. Cross-file LWC -> Apex resolution: @wire targets a real method,
+        #     sourced from a JS file node.
         wire_edges = [e for e in edges if e["relation"] == "wire_to"]
         assert wire_edges
         assert all(e["target"] in node_ids for e in wire_edges)
 
-        # 5c-bis. LWC -> LWC composition: accountList embeds statusBadge, and the
-        #         embeds edge survives the merge (sourced from the base id, not
-        #         the dropped _html sidecar) with both endpoints resolving.
+        # 5c-bis. LWC -> LWC composition: accountList's HTML file embeds the
+        #         statusBadge bundle; both endpoints resolve.
         embeds_edges = [e for e in edges if e["relation"] == "embeds"]
         assert embeds_edges
         assert all(e["source"] in node_ids and e["target"] in node_ids
                    for e in embeds_edges)
         assert any(
-            e["source"] == "lwc_accountlist" and e["target"] == "lwc_statusbadge"
+            e["source"] == "lwc_accountlist_html_accountlist"
+            and e["target"] == "lwc_statusbadge"
             for e in embeds_edges
         )
 

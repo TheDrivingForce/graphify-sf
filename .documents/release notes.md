@@ -1,5 +1,50 @@
 # Release Notes
 
+## 2026-06-28 22:23
+
+### Breaking Changes
+
+#### LWC modelled as a bundle of file nodes (multiple JS/HTML per component)
+
+An LWC is a *bundle* of files in a component folder. Previously the parser created a single `lwc_component` node per file **stem** and merged the matching `*.html` into the `*.js`, which (a) treated supplemental files as separate components and (b) orphaned any extra HTML template (`calendarView.html`, etc.) or supplemental JS module that didn't match the folder name.
+
+The model is now bundle-based:
+
+- **Component identity is the folder**, not the file stem: `lwc_<folder>` (e.g. `lwc_upcomingeventsviews`). This preserves the external link contract — `embeds` / `wire_to` / `imports` / `calls` still resolve to a component by this id (ADR-002).
+- Each JS file becomes an `lwc_controller` node (`lwc_<folder>_js_<stem>`); each HTML template an `lwc_template` node (`lwc_<folder>_html_<stem>`). CSS is ignored, as before.
+- Every file links to the bundle with a **`part_of`** edge. Supplemental JS/HTML are now first-class bundle members instead of being orphaned.
+- The main file (stem matches the folder) is flagged `sf_main_controller` / `sf_main_template`; the main controller's `export default class` name becomes the bundle label.
+- **Behavioral edges now source from the specific file node** that contains them (`@wire`, `@api`, `c/` imports, `calls`, and `embeds` from `c-` tags), not the bundle — so the graph attributes each dependency to the file that owns it.
+- The bundle node carries summary flags `sf_has_template`, `sf_js_file_count`, `sf_html_file_count`.
+
+New node types `lwc_controller` / `lwc_template` and relations `part_of` / `imports` / `member_of` / `instantiates` are registered in the SF schema reference, Neo4j export, and viz colour map.
+
+Verified across the eventspark repo: 115 bundles, 0 orphan file nodes, 0 dangling edges, and all 5 multi-template bundles (e.g. `eventSpeakers` with 5 templates, `upcomingEventsViews` with 6) now correctly aggregate every template.
+
+## 2026-06-28 21:52
+
+### New Features
+
+#### LWC-to-LWC JS-module imports and calls
+
+JS-only LWC "service" modules (a `*.js` file with no `*.html` template, exporting named functions other components import) are now linked. Previously such a module was orphaned — nothing referenced it.
+
+The LWC JS parser (`lwc.py`) now:
+
+- Models each exported function (`export { foo, bar }`, `export function foo`, `export const foo = ...`) as a callable node `lwc_<stem>_<fn>` with a `member_of` edge to the component.
+- Detects `import { foo } from 'c/otherModule'` and emits an `imports` edge (consumer → `lwc_<module>`).
+- When an imported name is actually invoked (`foo(...)`) in the body, emits a `calls` edge to the specific function node `lwc_<module>_<foo>`.
+
+Targets are emitted as stub nodes (ADR-012) that merge with the exporting module's real nodes via shared IDs (ADR-002), so the consumer's `calls` edge resolves to the exporter's function. Imported-but-uncalled names produce an `imports` edge only (a dependency, not a call). Base (`lwc`), `lightning/...`, and `@salesforce/...` imports are not treated as `c/` module links.
+
+## 2026-06-28 21:29
+
+### Fixes
+
+#### Pure DTO / wrapper classes no longer orphaned when instantiated
+
+A class instantiated only via `new TypeName()` — with no method ever called on it — was previously orphaned in the graph. The Apex parser walked only `method_invocation` nodes, so a `new TranslationResponse()` against a methodless DTO/wrapper produced no edge. The parser now also walks `object_creation_expression` nodes (`_constructed_type_name` in `apex_ts.py`), stashing the constructed type as `sf_unresolved_refs` on the class node. A new SF-wide pass `resolve_apex_refs` (`apex_calls.py`, wired into `extract_sf`) links the constructing class to the constructed class with an `instantiates` edge. Resolution is conservative — a name is linked only when exactly one Apex class declares it; collection containers (`new List<X>()`) and builtins (`new String()`) are skipped.
+
 ## 2026-06-28 18:26
 
 ### New Features
