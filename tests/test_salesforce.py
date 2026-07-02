@@ -39,6 +39,7 @@ from graphify.salesforce.objects import (
     extract_validation_rule,
 )
 from graphify.salesforce.order_of_execution import ooe_analysis_pass
+from graphify.salesforce.visualforce import extract_visualforce
 from graphify.salesforce.pipeline import build_sf_graph, write_sf_graph
 from graphify.salesforce.query import (
     sf_cpq_chain,
@@ -2323,3 +2324,235 @@ class TestBackwardsCompatibility:
             cwd=str(Path(__file__).parent.parent),
         )
         assert proc.returncode == 0, proc.stdout.decode() + proc.stderr.decode()
+
+
+def test_visualforce_page_controller_and_embeds(tmp_path: Path) -> None:
+    """A ``.page`` links to its Apex controller and embedded ``<c:...>`` components.
+
+    ``controller=`` -> a ``calls`` edge to ``apex_<class>`` (same id the Apex
+    parser emits, so it merges cross-file). Each ``<c:name>`` tag -> an ``embeds``
+    edge to ``vf_component_<name>``. A duplicated child tag yields one edge.
+    """
+    page = tmp_path / "eventHome.page"
+    page.write_text(
+        '<apex:page controller="EventSiteController" showHeader="false">\n'
+        "  <c:themeLoader pageController=\"{!self}\" />\n"
+        "  <c:eventTitle event=\"{!event}\" />\n"
+        "  <c:eventTitle event=\"{!other}\" />\n"  # duplicate -> one edge
+        "  <apex:outputPanel>ignored base tag</apex:outputPanel>\n"
+        "</apex:page>\n",
+        encoding="utf-8",
+    )
+    res = extract_visualforce(page)
+    _assert_no_dangling_edges(res)
+
+    page_node = next(n for n in res["nodes"] if n["id"] == "vf_page_eventhome")
+    assert page_node["file_type"] == "vf_page"
+
+    # controller -> calls edge to the Apex class node (cross-file merge id).
+    calls = [e for e in res["edges"] if e["relation"] == "calls"]
+    assert len(calls) == 1
+    assert calls[0]["source"] == "vf_page_eventhome"
+    assert calls[0]["target"] == "apex_eventsitecontroller"
+    assert calls[0]["sf_vf_controller"] == "EventSiteController"
+
+    # <c:...> embeds -> one edge per distinct component; base apex: tags ignored.
+    embeds = [e for e in res["edges"] if e["relation"] == "embeds"]
+    assert {e["target"] for e in embeds} == {
+        "vf_component_themeloader",
+        "vf_component_eventtitle",
+    }
+    assert all(e["source"] == "vf_page_eventhome" for e in embeds)
+    assert len([e for e in embeds if e["target"] == "vf_component_eventtitle"]) == 1
+    assert any(e.get("sf_embedded_tag") == "c:themeLoader" for e in embeds)
+
+
+def test_visualforce_lightning_out_embeds_lwc(tmp_path: Path) -> None:
+    """``$Lightning.createComponent("<ns>:<name>", ...)`` -> ``embeds`` to the LWC.
+
+    Lightning Out mounts an LWC into a VF page. The component name after the
+    ``<ns>:`` prefix is the LWC's camelCase folder, so the edge targets
+    ``lwc_<name>`` (the LWC parser's bundle id) and merges cross-file. The
+    ``$Lightning.use("...:LightningOutApp", ...)`` container app is NOT an embed.
+    A component created twice yields one edge.
+    """
+    page = tmp_path / "eventHome.page"
+    page.write_text(
+        '<apex:page controller="EventSiteController">\n'
+        "  <script>\n"
+        '    $Lightning.use("evsprk:LightningOutApp", function () {\n'
+        '      $Lightning.createComponent("evsprk:eventSpeakersByCategory",\n'
+        "        { hideImages: true }, containerId, function (cmp, status) {});\n"
+        "    });\n"
+        '    $Lightning.use("evsprk:LightningOutApp", function () {\n'
+        "      $Lightning.createComponent('c:locationMap', {}, id2, cb);\n"
+        "    });\n"
+        "    // created again elsewhere -> still one edge\n"
+        '    $Lightning.createComponent("evsprk:eventSpeakersByCategory", {}, id3, cb);\n'
+        "  </script>\n"
+        "</apex:page>\n",
+        encoding="utf-8",
+    )
+    res = extract_visualforce(page)
+    _assert_no_dangling_edges(res)
+
+    lo = [e for e in res["edges"] if e.get("sf_lightning_out")]
+    assert {e["target"] for e in lo} == {
+        "lwc_eventspeakersbycategory",  # namespace prefix stripped
+        "lwc_locationmap",              # 'c:' prefix stripped too
+    }
+    assert all(e["relation"] == "embeds" for e in lo)
+    assert all(e["source"] == "vf_page_eventhome" for e in lo)
+    # Created twice -> exactly one edge to that LWC.
+    assert len([e for e in lo if e["target"] == "lwc_eventspeakersbycategory"]) == 1
+    # The container app ("...:LightningOutApp") is not embedded as a component.
+    assert not any(e["target"] == "lwc_lightningoutapp" for e in lo)
+    # The LWC stub is typed so it merges with the real bundle node.
+    stub = next(n for n in res["nodes"] if n["id"] == "lwc_locationmap")
+    assert stub["file_type"] == "lwc_component"
+
+
+def test_visualforce_extensions_and_standard_controller(tmp_path: Path) -> None:
+    """``extensions="A,B"`` -> Apex calls; ``standardController`` -> SObject call.
+
+    Every comma-separated extension is a separate Apex controller class. The
+    ``standardController`` names an SObject (not Apex), so its ``calls`` edge
+    targets ``sobject_<name>`` via ``sobject_nid`` for cross-file resolution.
+    """
+    page = tmp_path / "addLeadToEvent.page"
+    page.write_text(
+        '<apex:page standardController="Lead"\n'
+        '    extensions="AddContactsToEvent, LeadHelper" showHeader="false">\n'
+        "</apex:page>\n",
+        encoding="utf-8",
+    )
+    res = extract_visualforce(page)
+    _assert_no_dangling_edges(res)
+
+    calls = [e for e in res["edges"] if e["relation"] == "calls"]
+    targets = {e["target"] for e in calls}
+    # Both extensions -> Apex class nodes.
+    assert "apex_addcontactstoevent" in targets
+    assert "apex_leadhelper" in targets
+    # standardController -> SObject node via sobject_nid (matches Apex/Object id).
+    assert sobject_nid("Lead") in targets
+    std = next(e for e in calls if e["target"] == sobject_nid("Lead"))
+    assert std["context"] == "standard_controller"
+    assert std["sf_standard_controller"] == "Lead"
+    # The SObject stub is typed so it merges with the real object node.
+    sobj_node = next(n for n in res["nodes"] if n["id"] == sobject_nid("Lead"))
+    assert sobj_node["file_type"] == "sobject"
+
+
+def test_visualforce_component_node_and_embed_merge(tmp_path: Path) -> None:
+    """A ``.component`` becomes a ``vf_component`` node an embedding page resolves to.
+
+    A page embedding ``<c:themeLoader>`` emits a stub ``vf_component_themeloader``;
+    the component file emits the real node with the SAME id, so ``extract_sf``
+    merges them into one node (cross-file resolution, ADR-002).
+    """
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    (pages / "host.page").write_text(
+        '<apex:page controller="HostCtrl">\n'
+        "  <c:themeLoader />\n"
+        "</apex:page>\n",
+        encoding="utf-8",
+    )
+    comps = tmp_path / "components"
+    comps.mkdir()
+    (comps / "themeLoader.component").write_text(
+        '<apex:component controller="ThemeCtrl">\n'
+        '  <apex:attribute name="mode" type="String" />\n'
+        "</apex:component>\n",
+        encoding="utf-8",
+    )
+
+    res = extract_sf(tmp_path, ooe=False, fields=False)
+    nodes_by_id = {n["id"]: n for n in res["nodes"]}
+
+    # Exactly one themeLoader component node (stub from the page merged with the
+    # real node from the component file).
+    theme = nodes_by_id["vf_component_themeloader"]
+    assert theme["file_type"] == "vf_component"
+
+    # The page's embeds edge resolves to that shared component node.
+    embeds = [
+        e for e in res["edges"]
+        if e["relation"] == "embeds" and e["source"] == "vf_page_host"
+    ]
+    assert [e["target"] for e in embeds] == ["vf_component_themeloader"]
+
+    # The component's own controller is captured as a calls edge.
+    assert any(
+        e["source"] == "vf_component_themeloader"
+        and e["target"] == "apex_themectrl"
+        and e["relation"] == "calls"
+        for e in res["edges"]
+    )
+
+
+def test_visualforce_lightning_out_merges_with_real_lwc(tmp_path: Path) -> None:
+    """A page's Lightning Out ``embeds`` edge resolves to the real LWC bundle node.
+
+    The page emits a stub ``lwc_speakerlist``; the LWC's own JS parser emits the
+    real bundle node with the SAME id, so ``extract_sf`` merges them — the embed
+    lands on the actual bundle (with its file counts), not a lone stub (ADR-002).
+    """
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    (pages / "host.page").write_text(
+        '<apex:page controller="HostCtrl">\n'
+        "  <script>\n"
+        '    $Lightning.createComponent("evsprk:speakerList", {}, id, cb);\n'
+        "  </script>\n"
+        "</apex:page>\n",
+        encoding="utf-8",
+    )
+    lwc_dir = tmp_path / "lwc" / "speakerList"
+    lwc_dir.mkdir(parents=True)
+    (lwc_dir / "speakerList.js").write_text(
+        "import { LightningElement } from 'lwc';\n"
+        "export default class SpeakerList extends LightningElement {}\n",
+        encoding="utf-8",
+    )
+
+    res = extract_sf(tmp_path, ooe=False, fields=False)
+    nodes_by_id = {n["id"]: n for n in res["nodes"]}
+
+    # Exactly one bundle node, carrying the real component identity (class label)
+    # and file count from the LWC parser — proof the stub merged, not duplicated.
+    bundle = nodes_by_id["lwc_speakerlist"]
+    assert bundle["file_type"] == "lwc_component"
+    assert bundle["label"] == "SpeakerList"
+    assert bundle.get("sf_js_file_count") == 1
+
+    # The page's Lightning Out embed edge points at that shared bundle node.
+    embeds = [
+        e for e in res["edges"]
+        if e["relation"] == "embeds"
+        and e["source"] == "vf_page_host"
+        and e.get("sf_lightning_out")
+    ]
+    assert [e["target"] for e in embeds] == ["lwc_speakerlist"]
+
+
+def test_visualforce_parser_encoding_error(tmp_path: Path) -> None:
+    """A file that is not valid UTF-8 degrades to a single concept error node."""
+    bad = tmp_path / "broken.page"
+    bad.write_bytes(b"<apex:page>\xff\xfe not utf-8</apex:page>")
+    res = extract_visualforce(bad)
+    assert len(res["nodes"]) == 1
+    assert res["nodes"][0]["file_type"] == "concept"
+    assert res["nodes"][0]["sf_error_type"] == "visualforce_parse_error"
+    assert res["edges"] == []
+
+
+def test_visualforce_dispatch_registered() -> None:
+    """``register()`` wires ``.page`` / ``.component`` into the core dispatch."""
+    import graphify.salesforce as sf
+    from graphify.extract import _DISPATCH
+
+    sf.register()
+    assert _DISPATCH[".page"] is extract_visualforce
+    assert _DISPATCH[".component"] is extract_visualforce

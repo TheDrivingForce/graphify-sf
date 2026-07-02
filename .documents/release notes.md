@@ -1,5 +1,22 @@
 # Release Notes
 
+## 2026-07-02 21:25
+
+### Features
+
+#### Visualforce page / component support
+
+The parser now handles the two classic Visualforce markup files — `*.page` and `*.component` — so a legacy VF UI layer is visible alongside LWC and Aura in impact analysis.
+
+- Each file becomes a node: a **`vf_page`** (`vf_page_<stem>`) or **`vf_component`** (`vf_component_<stem>`). The kind is part of the id so a page and component sharing a base name stay distinct.
+- **`calls`** edges to Apex controllers named on the root `<apex:page>` / `<apex:component>` tag: the `controller=` attribute and every comma-separated class in `extensions="A,B"`. Targets use the `apex_<class>` id, so they resolve to the Apex parser's class nodes without a dedicated pass (ADR-002).
+- **`calls`** edge to the `standardController="<Object>"` SObject (a data binding, not Apex) via `sobject_nid`, so a page on a standard/custom object still shows its object dependency.
+- **`embeds`** edges to each local `<c:...>` custom component, targeting `vf_component_<name>`. Base `<apex:...>` tags, standard HTML, and duplicate tags are ignored.
+- **`embeds`** edges to each LWC surfaced via **Lightning Out** — `$Lightning.createComponent("<ns>:<lwcName>", ...)` — targeting the LWC bundle node `lwc_<name>`, so a VF page's dependency on an LWC is traversable. The namespace prefix (`evsprk`, `c`, a package prefix) is stripped; the container `$Lightning.use("...:LightningOutApp")` app is not treated as an embed. Verified against eventspark: 8 Lightning Out embeds, 7 merging with the real LWC bundle.
+- Referenced controllers, SObjects, and embedded components are emitted as stub nodes so the per-file result has no dangling edges; they merge with the real nodes via the shared id (ADR-012).
+
+Wired into both `register()` (core `_DISPATCH`) and the internal `_parser_for` dispatch. Neo4j export maps the new types to `VisualforcePage` / `VisualforceComponent`; the HTML viz colours them purple. Regex-only and lenient (ADR-009): an unreadable file degrades to a single `concept` error node.
+
 ## 2026-06-28 22:23
 
 ### Breaking Changes

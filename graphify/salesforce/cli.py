@@ -53,6 +53,14 @@ def _cmd_extract(args: argparse.Namespace) -> int:
     from graphify.salesforce import extract_sf
     from graphify.salesforce.pipeline import build_sf_graph, write_sf_graph
 
+    src = Path(args.path)
+    if not src.exists():
+        print(f"error: path not found: {args.path}", file=sys.stderr)
+        return 1
+    if not src.is_dir():
+        print(f"error: path is not a directory: {args.path}", file=sys.stderr)
+        return 1
+
     out_dir = Path(args.output_dir)
     print(f"🚀 Extracting {args.path}")
     extraction = extract_sf(

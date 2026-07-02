@@ -35,6 +35,8 @@ SF_NODE_TYPE_TO_NEO4J_LABEL: dict[str, str] = {
     "lwc_component": "LWCComponent",
     "lwc_controller": "LWCController",
     "lwc_template": "LWCTemplate",
+    "vf_page": "VisualforcePage",
+    "vf_component": "VisualforceComponent",
     "cpq_rule": "CPQRule",
     "cpq_qcp_method": "CPQQCPMethod",
     "profile": "Profile",

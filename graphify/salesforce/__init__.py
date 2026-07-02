@@ -46,6 +46,7 @@ def register():
         extract_validation_rule,
     )
     from .profiles import extract_permission_set, extract_profile
+    from .visualforce import extract_visualforce
 
     _DISPATCH[".cls"] = extract_apex_enhanced
     _DISPATCH[".trigger"] = extract_apex_enhanced
@@ -63,6 +64,8 @@ def register():
     _DISPATCH[".permissionset-meta.xml"] = extract_permission_set
     _DISPATCH[".html"] = extract_lwc_html
     _DISPATCH[".js"] = extract_lwc_js
+    _DISPATCH[".page"] = extract_visualforce
+    _DISPATCH[".component"] = extract_visualforce
 
 
 def _parser_for(path: Path):
@@ -90,6 +93,7 @@ def _parser_for(path: Path):
         extract_validation_rule,
     )
     from .profiles import extract_permission_set, extract_profile
+    from .visualforce import extract_visualforce
 
     name = path.name
     if name.endswith(".object-meta.xml"):
@@ -120,6 +124,11 @@ def _parser_for(path: Path):
     suffix = path.suffix
     if suffix in (".cls", ".trigger"):
         return extract_apex_enhanced
+
+    # Visualforce markup — the ``.page`` / ``.component`` suffixes are VF-only,
+    # so no directory guard is needed (unlike LWC ``.html`` / ``.js``).
+    if suffix in (".page", ".component"):
+        return extract_visualforce
 
     # LWC HTML/JS only — guard on an lwc/ directory in the path.
     is_lwc = "lwc" in {p.lower() for p in path.parts[:-1]}

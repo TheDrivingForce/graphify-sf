@@ -99,3 +99,65 @@ registered in the SF schema reference (`validate_sf.py`), the Neo4j export
 - **Merge pass simplified.** `_merge_lwc_components` no longer folds/deletes
   nodes; it only derives bundle summary flags and applies the authoritative
   component label from the main controller.
+
+## ADR-101 — Visualforce pages / components as first-class nodes
+
+**Status:** Accepted — 2026-07-02
+
+### Context
+
+Visualforce (`*.page`, `*.component`) is the classic server-rendered UI layer
+that predates LWC/Aura and is still widespread in older orgs (eventspark has
+~70 pages/components). The tool modelled Apex, LWC, and Aura but skipped VF, so
+a page's dependency on its Apex controller and on the components it embeds was
+invisible to impact analysis — changing a controller gave no signal that a VF
+page consuming it might break.
+
+VF markup is HTML-ish but not reliably well-formed XML in practice (unescaped
+`&`, HTML5 void tags, `{! ... }` merge fields), and the only signal we need
+lives on the root tag's attributes plus `<c:...>` child tags. This matches the
+regex-only approach already used for LWC (upstream) rather than an XML parser.
+
+### Decision
+
+Add `visualforce.py` with `extract_visualforce`, one parser for both suffixes,
+wired into `register()` and `_parser_for`. Node/edge model:
+
+- One node per file: `vf_page` (`vf_page_<stem>`) or `vf_component`
+  (`vf_component_<stem>`). The kind is in the id so a page and component that
+  share a base name stay distinct; `<c:...>` embeds only ever resolve to
+  `vf_component_<name>` (pages are not embeddable).
+- `calls` edges to Apex controllers: `controller=` and each comma-separated
+  class in `extensions="A,B"`, targeting `apex_<class>` (the Apex parser's id).
+- `calls` edge to `standardController="<Object>"` targeting `sobject_<name>`
+  via `sobject_nid` — a standard/custom object is data, not Apex, so it links to
+  the object node (decision: link, don't just annotate, so the dependency is
+  traversable).
+- `embeds` edges to each `<c:...>` local custom component
+  (`vf_component_<name>`). Base `<apex:...>` tags and standard HTML are ignored.
+- `embeds` edges to each LWC surfaced via **Lightning Out**
+  (`$Lightning.createComponent("<ns>:<name>", ...)`), targeting the LWC bundle
+  node `lwc_<name>` (the LWC parser's id, ADR-002). The namespace prefix is
+  stripped — component identity is the camelCase name, which is the LWC folder.
+  The `$Lightning.use("<ns>:LightningOutApp", ...)` call names the container Aura
+  *app*, not the embedded component, so only `createComponent` is matched. These
+  edges are `INFERRED` (0.9), not `EXTRACTED`, since the target is resolved from a
+  string literal in JS rather than a markup tag; a name that resolves to an Aura
+  component instead of an LWC simply leaves a non-merging stub.
+
+All link targets are emitted as stub nodes (ADR-012) that merge with the real
+nodes via the shared id (ADR-002), exactly as LWC does. Lenient parsing
+(ADR-009): a read/decode failure degrades to one `concept` error node.
+
+### Consequences
+
+- **VF is now visible in impact analysis.** A controller change surfaces the VF
+  pages that call it; a component change surfaces the pages/components embedding
+  it. `standardController` pages link to their object.
+- **Deliberate scope limits.** `<apex:attribute type="SomeController">` (a type
+  reference inside a component's attribute declaration) is NOT treated as a
+  `calls` link — attribute types are frequently SObjects/primitives, so it would
+  be noisy. `<c:...>` embeds inside `.email` templates are out of scope (only
+  `.page`/`.component` files are parsed). Both can be revisited if needed.
+- **New node types** `vf_page` / `vf_component` added to the Neo4j label map
+  (`VisualforcePage` / `VisualforceComponent`) and the HTML viz colour map.
