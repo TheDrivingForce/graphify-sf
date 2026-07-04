@@ -161,3 +161,104 @@ nodes via the shared id (ADR-002), exactly as LWC does. Lenient parsing
   `.page`/`.component` files are parsed). Both can be revisited if needed.
 - **New node types** `vf_page` / `vf_component` added to the Neo4j label map
   (`VisualforcePage` / `VisualforceComponent`) and the HTML viz colour map.
+
+## ADR-102 — Aura components / applications as first-class nodes
+
+**Status:** Accepted — 2026-07-02
+
+### Context
+
+Aura (`*.cmp`, `*.app`) is the Lightning-era component framework that sits
+between Visualforce and LWC. It was the last major UI layer the tool did not
+model, so an Aura component's Apex controller dependency and the children/LWCs it
+renders were invisible to impact analysis. Aura is also the bridge for Lightning
+Out: a `.app` extending `ltng:outApp` is the container that surfaces LWCs into
+Visualforce (see ADR-101), and it declares those LWCs via `<aura:dependency>`.
+
+An Aura bundle is a folder of files (markup `.cmp`/`.app`, plus
+`*Controller.js`/`*Helper.js`/`*Renderer.js`, `.css`, `.design`, `.svg`,
+`.auradoc`, `.evt`). Unlike LWC — where the Apex dependency lives in the JS
+(`@salesforce/apex` imports) — an Aura bundle's class-level dependency is the
+`controller=` attribute on the markup root, and the components it renders are
+`<c:...>` tags in the markup. So the markup file alone carries every signal we
+model; the JS files call Apex methods via `c.method` but resolving those to
+specific method nodes is a deeper, cross-file-within-bundle concern deferred for
+now.
+
+The hard problem: the `c:` namespace is shared by Aura components AND LWCs, so
+`<c:foo>` in a `.cmp` could be either, and there is no syntactic marker. An Aura
+component can embed an LWC but not the reverse.
+
+### Decision
+
+Add `aura.py` with `extract_aura`, one parser for both `.cmp` and `.app`, wired
+into `register()` and `_parser_for` (guarded to an `aura/` directory like LWC).
+Only the markup file is parsed; one node per bundle. Node/edge model:
+
+- One `aura_component` node per bundle (`aura_<folder>`), tagged
+  `sf_aura_type` = `component` / `application`.
+- `calls` edge to the Apex `controller=` class -> `apex_<class>` (ADR-002 id).
+- `embeds` edge per `<c:...>` child, disambiguated by the **SF naming rule**: an
+  LWC's name MUST start lowercase, an Aura component conventionally starts
+  uppercase. So lowercase-initial -> `lwc_<name>`, uppercase-initial ->
+  `aura_<name>`. Verified accurate across every eventspark Aura embed (e.g.
+  `SetupMain` renders both `<c:SetupDashboard>` (Aura) and `<c:setupStatus>`
+  (LWC)). The edge records `sf_embed_kind`.
+- `embeds` edge per `<aura:dependency resource="X"/>` -> `lwc_<X>` (INFERRED
+  0.9), capturing the LWCs a Lightning Out container `.app` surfaces.
+
+All targets are stub nodes (ADR-012) that merge with real nodes via the shared id
+(ADR-002). Lenient parsing (ADR-009): a read/decode failure -> one `concept`
+error node.
+
+### Consequences
+
+- **Aura is now visible in impact analysis**, closing the last UI-layer gap
+  (VF/LWC/Aura all modelled). The Lightning Out chain is now traversable
+  end-to-end: VF page `$Lightning.createComponent` -> LWC, and the
+  `LightningOutApp.app` -> its declared LWC dependencies.
+- **Case heuristic is a convention, not a guarantee.** If a project ever names an
+  Aura component with a lowercase initial (against convention), its embed would
+  resolve to a non-existent `lwc_<name>` stub. This is the same graceful outcome
+  as any unresolved embed (a non-merging stub, no dangling edge), and the rule
+  held for 100% of the real corpus, so it was preferred over emitting both ids.
+- **Deliberate scope limit.** JS `c.<method>` Apex calls in Aura controllers are
+  NOT resolved to method nodes — only the class-level `controller=` link is
+  captured. Method-level resolution can be added later.
+- **`aura_component`** was already in the Neo4j label map (`AuraComponent`);
+  added a viz colour.
+
+---
+
+## ADR-103 — Apex triggers link to the SObject they fire on
+
+**Status:** Accepted — 2026-07-04
+
+### Context
+
+The `triggers_on` relation was already wired end-to-end — the Neo4j label map
+(`TRIGGERS_ON`), the `validate_sf` known-relations allowlist, and the Order of
+Execution pass (`_OOE_TRIGGERING_RELATIONS = {"triggers_on", "validates"}`) all
+expected it — but no parser emitted it. An Apex trigger declares its subject
+SObject in the header (`trigger AccountTrigger on Account (...)`); that signal
+was parsed for the trigger node but discarded, so triggers had no edge to the
+object they run against and OoE chains were only ever seeded by Validation Rules.
+
+### Decision
+
+Emit a `triggers_on` edge (`EXTRACTED`) from the trigger's `apex_<stem>` node to
+`sobject_nid(<SObject>)` — the identifier after the `on` keyword. Added to both
+Apex parsers so they keep identical node/edge shapes (ADR-019): `apex_ts`
+(tree-sitter, the primary path — reads the `identifier` child following the `on`
+child of `trigger_declaration`) and `_extract_apex_regex` (fallback — a
+`trigger \w+ on (\w+)` regex). The target reuses the shared `sobject_nid` so it
+merges with the real object node (ADR-002) via a stub (ADR-012), and the
+`_is_sobject_name` guard rejects `__r`/non-SObject names as with SOQL/DML targets.
+
+### Consequences
+
+- **Triggers are now first-class in impact analysis and OoE.** Every triggered
+  SObject seeds its 18-step Order of Execution chain, not just those with
+  Validation Rules; the trigger→object relationship is traversable.
+- **No new plumbing was required** — the relation was already registered in every
+  downstream consumer, so the change is purely additive at the parser layer.

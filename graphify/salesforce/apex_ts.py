@@ -330,6 +330,22 @@ def _find_definition(root):
     return None
 
 
+def _trigger_sobject(trigger_node, source: bytes) -> str | None:
+    """Return the SObject a ``trigger_declaration`` fires on, or ``None``.
+
+    Grammar is ``trigger <name> on <SObject> ( <events> ) { ... }`` — the target
+    is the first ``identifier`` following the ``on`` keyword child.
+    """
+    seen_on = False
+    for c in trigger_node.children:
+        if c.type == "on":
+            seen_on = True
+            continue
+        if seen_on and c.type == "identifier":
+            return _text(c, source)
+    return None
+
+
 def _implements_text(class_node, source: bytes) -> str:
     """Concatenated text of the ``interfaces`` clause (for QCP/Batchable hints)."""
     parts: list[str] = []
@@ -398,6 +414,25 @@ def extract_apex(path: Path) -> dict:
             "source": source.decode("utf-8", errors="replace"),
         }
     )
+
+    # 1.5 Trigger -> SObject it fires on ---------------------------------
+    # ``trigger AccountTrigger on Account (...)`` names the SObject the trigger
+    # runs against. Emit a `triggers_on` edge to that object so the graph shows
+    # which trigger acts on which SObject (mirrors queries / dml_operates_on).
+    if code_type == "trigger":
+        sobject_name = _trigger_sobject(definition, source)
+        if sobject_name and _is_sobject_name(sobject_name):
+            target_id = sobject_nid(sobject_name)
+            _ensure_sobject_node(nodes, target_id, sobject_name, path)
+            edges.append(
+                {
+                    "source": class_id,
+                    "target": target_id,
+                    "relation": "triggers_on",
+                    "confidence": "EXTRACTED",
+                    "source_file": str(path),
+                }
+            )
 
     # 2. Method signatures (overload-aware) -------------------------------
     # First collect every method_declaration, grouped by lowercased name, so we

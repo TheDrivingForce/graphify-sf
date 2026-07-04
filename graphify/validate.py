@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 VALID_FILE_TYPES = {"code", "document", "paper", "image", "rationale", "concept",
-                    "sobject", "flow", "lwc_component", "profile", "permission_set", "cpq_rule", "cpq_qcp_method", "aura_component",
+                    "sobject", "flow", "lwc_component", "lwc_controller", "lwc_template",
+                    "vf_page", "vf_component", "aura_component",
+                    "profile", "permission_set", "cpq_rule", "cpq_qcp_method",
                     # Salesforce vocabulary — mirror of validate_sf.SF_FILE_TYPES so
                     # base validation accepts SF nodes (kept in sync manually; SF is a
                     # lower layer that must not import this module).

@@ -45,6 +45,7 @@ def register():
         extract_custom_object,
         extract_validation_rule,
     )
+    from .aura import extract_aura
     from .profiles import extract_permission_set, extract_profile
     from .visualforce import extract_visualforce
 
@@ -66,6 +67,8 @@ def register():
     _DISPATCH[".js"] = extract_lwc_js
     _DISPATCH[".page"] = extract_visualforce
     _DISPATCH[".component"] = extract_visualforce
+    _DISPATCH[".cmp"] = extract_aura
+    _DISPATCH[".app"] = extract_aura
 
 
 def _parser_for(path: Path):
@@ -92,6 +95,7 @@ def _parser_for(path: Path):
         extract_custom_object,
         extract_validation_rule,
     )
+    from .aura import extract_aura
     from .profiles import extract_permission_set, extract_profile
     from .visualforce import extract_visualforce
 
@@ -129,6 +133,12 @@ def _parser_for(path: Path):
     # so no directory guard is needed (unlike LWC ``.html`` / ``.js``).
     if suffix in (".page", ".component"):
         return extract_visualforce
+
+    # Aura markup — ``.cmp`` / ``.app`` under an aura/ directory. Guarding on the
+    # directory mirrors LWC and keeps a stray ``.app`` elsewhere from matching.
+    is_aura = "aura" in {p.lower() for p in path.parts[:-1]}
+    if is_aura and suffix in (".cmp", ".app"):
+        return extract_aura
 
     # LWC HTML/JS only — guard on an lwc/ directory in the path.
     is_lwc = "lwc" in {p.lower() for p in path.parts[:-1]}

@@ -36,7 +36,9 @@ SF_FILE_TYPES = {
     "cpq_qcp_method",   # QCP Calc Engine callback node (ADR-025)
     "cpq_condition",    # CPQ Price/Error Condition record (cpq_data)
     "cpq_action",       # CPQ Price/Product Action record (cpq_data)
-    "aura_component",   # Aura Component (legacy)
+    "aura_component",   # Aura Component / Application (legacy, ADR-102)
+    "vf_page",          # Visualforce page (ADR-101)
+    "vf_component",     # Visualforce component (ADR-101)
     "validation_rule",  # Validation Rule (ADR-030)
     "record_type",          # Record Type (objects/<Obj>/recordTypes)
     "permission_set_group", # Permission Set Group

@@ -25,7 +25,7 @@ from graphify.security import sanitize_label
 _COLORS = {
     "sobject": "#e74c3c", "code": "#3498db", "lwc_component": "#16a085",
     "lwc_controller": "#1abc9c", "lwc_template": "#48c9b0",
-    "vf_page": "#8e44ad", "vf_component": "#a569bd",
+    "vf_page": "#8e44ad", "vf_component": "#a569bd", "aura_component": "#5b2c6f",
     "validation_rule": "#9b59b6", "field": "#f39c12", "flow": "#2ecc71",
     "cpq_rule": "#e67e22", "cpq_condition": "#d35400", "cpq_action": "#c0392b",
     "cpq_qcp_method": "#1abc9c", "profile": "#95a5a6", "concept": "#7f8c8d",

@@ -44,6 +44,10 @@ from graphify.salesforce.constants import (
 #: naive ``(?:public|private)?\s+`` form misses it.
 _DEFINITION_RE = re.compile(r"\b(class|trigger)\s+(\w+)", re.IGNORECASE)
 
+#: Trigger target SObject: ``trigger <name> on <SObject> (...)``. The SObject
+#: after ``on`` is what the trigger fires against (``triggers_on`` edge).
+_TRIGGER_ON_RE = re.compile(r"\btrigger\s+\w+\s+on\s+(\w+)", re.IGNORECASE)
+
 #: Access modifier preceding a ``class`` keyword, captured separately so the
 #: anchored ``_DEFINITION_RE`` above still matches modifier-less declarations.
 _CLASS_SCOPE_RE = re.compile(
@@ -319,6 +323,26 @@ def _extract_apex_regex(path: Path) -> dict:
             "source": source,  # kept for CPQ / governor passes
         }
     )
+
+    # 1.5 Trigger -> SObject it fires on ---------------------------------
+    # ``trigger AccountTrigger on Account (...)`` names the SObject the trigger
+    # runs against; emit a `triggers_on` edge to that object (matches apex_ts).
+    if code_type == "trigger":
+        on_match = _TRIGGER_ON_RE.search(scan)
+        if on_match:
+            sobject_name = on_match.group(1)
+            if _is_sobject_name(sobject_name):
+                target_id = sobject_nid(sobject_name)
+                _ensure_sobject_node(nodes, target_id, sobject_name, path)
+                edges.append(
+                    {
+                        "source": class_id,
+                        "target": target_id,
+                        "relation": "triggers_on",
+                        "confidence": "EXTRACTED",
+                        "source_file": str(path),
+                    }
+                )
 
     # 2. Method signatures ------------------------------------------------
     for method in _METHOD_RE.finditer(scan):

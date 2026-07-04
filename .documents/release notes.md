@@ -1,5 +1,40 @@
 # Release Notes
 
+## 2026-07-04 00:00
+
+### Features
+
+#### Apex triggers now link to the SObject they fire on
+
+An Apex trigger's header (`trigger AccountTrigger on Account (...)`) names the SObject it runs against, but that link was never emitted — triggers had no edge to their object. Both Apex parsers now emit a **`triggers_on`** edge (`EXTRACTED`) from the trigger node (`apex_<stem>`) to `sobject_nid(<SObject>)`: [apex_ts.py](../graphify/salesforce/apex_ts.py) (tree-sitter, primary path) reads the identifier after the `on` keyword in the `trigger_declaration`; [apex_enhanced.py](../graphify/salesforce/apex_enhanced.py) (regex fallback) matches `trigger \w+ on (\w+)`. The target reuses the shared `sobject_nid` so it merges with the real object node (ADR-002), and the `_is_sobject_name` guard rejects `__r`/non-SObject names.
+
+The `triggers_on` relation was already registered everywhere downstream — the Neo4j label map (`TRIGGERS_ON`), the `validate_sf` allowlist, and the Order of Execution pass — so this is a purely additive parser change. As a result, **every SObject with a trigger now seeds its 18-step Order of Execution chain** (previously only Validation Rules did), and the trigger→object relationship is traversable in impact analysis. Verified against all trigger fixtures and the full salesforce test suite (72 passing). Recorded as ADR-103.
+
+## 2026-07-02 22:56
+
+### Fixes
+
+#### UI-layer file_types no longer collapse to `concept` through the core builder
+
+`aura_component`, `vf_page`, `vf_component`, `lwc_controller`, and `lwc_template` were missing from the `file_type` allowlists that the **core** `graphify` pipeline enforces, so any node of those types was silently downgraded to `concept` when a graph was built via `build.build_from_json` / validated via the base `validate` module (e.g. `python -m graphify.salesforce extract`, or `register()` + core `graphify`). The SF-native path (`extract_sf` + `build_sf_graph`) was unaffected, which is why the parsers' own tests passed while the emitted `graph.json` showed `.cmp`/`.app` nodes as `concept`.
+
+Added the five types to all three allowlists — [validate_sf.py](../graphify/salesforce/validate_sf.py) `SF_FILE_TYPES` (canonical), [validate.py](../graphify/validate.py) `VALID_FILE_TYPES` (base mirror), and [build.py](../graphify/build.py) (base builder). Verified on the full eventspark org: 37 `aura_component`, 36 `vf_page`, 31 `vf_component` nodes now render with their real types; 0 aura files collapse to `concept`.
+
+## 2026-07-02 22:47
+
+### Features
+
+#### Aura component / application support
+
+The parser now handles Aura markup files — `*.cmp` (component) and `*.app` (application) — so the Aura UI layer is visible alongside VF and LWC. Only the markup file is parsed (it is the bundle's identity and carries every modelled signal); the supplemental JS/CSS/design/svg/auradoc/evt files are not, mirroring how VF treats a page as one node.
+
+- Each bundle becomes an **`aura_component`** node (`aura_<folder>`), flagged `sf_aura_type` = `component` or `application`.
+- **`calls`** edge to the Apex `controller=` class on the root tag -> `apex_<class>`.
+- **`embeds`** edges to each local `<c:...>` child. The `c:` namespace is shared by Aura components AND LWCs, so the target is disambiguated by the framework's naming rule: a **lowercase-initial** name is an LWC (`lwc_<name>`), an **uppercase-initial** name an Aura component (`aura_<name>`). An Aura component can embed an LWC, not vice versa. The edge records `sf_embed_kind` = `aura` / `lwc`.
+- **`embeds`** edges to each `<aura:dependency resource="X"/>` in a Lightning Out container `.app` -> `lwc_<X>` — the LWCs that app surfaces (the same ids the VF `$Lightning.createComponent` calls target).
+
+Wired into `register()` and `_parser_for` (guarded to an `aura/` directory). `aura_component` already mapped to the `AuraComponent` Neo4j label; added a viz colour. Verified against eventspark: 31 Aura nodes, 0 dangling edges, all controller/child links resolving to real nodes; the case heuristic correctly split mixed `<c:...>` children (e.g. `SetupMain` embeds both Aura children and LWCs). Recorded as ADR-102.
+
 ## 2026-07-02 21:25
 
 ### Features

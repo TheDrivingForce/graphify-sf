@@ -188,6 +188,8 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
             "code", "document", "paper", "image", "rationale", "concept",
             # Salesforce-specific types (graphify-sf)
             "sobject", "field", "flow", "validation_rule", "lwc_component",
+            "lwc_controller", "lwc_template", "vf_page", "vf_component",
+            "aura_component",
             "profile", "permission_set", "permission_set_group", "record_type",
             "workflow", "cmt_record", "sharing_rule", "custom_label",
             "cpq_rule", "cpq_condition", "cpq_action", "cpq_qcp_method",

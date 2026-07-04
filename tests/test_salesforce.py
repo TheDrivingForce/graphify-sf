@@ -38,6 +38,7 @@ from graphify.salesforce.objects import (
     extract_custom_object,
     extract_validation_rule,
 )
+from graphify.salesforce.aura import extract_aura
 from graphify.salesforce.order_of_execution import ooe_analysis_pass
 from graphify.salesforce.visualforce import extract_visualforce
 from graphify.salesforce.pipeline import build_sf_graph, write_sf_graph
@@ -246,6 +247,12 @@ def test_apex_soql_relationship_subquery_not_sobject(tmp_path: Path) -> None:
     triggers = [n for n in trig_result["nodes"] if n.get("sf_code_type") == "trigger"]
     assert len(triggers) == 1
     assert triggers[0]["label"] == "AccountTrigger"
+
+    # Trigger -> SObject it fires on: `trigger AccountTrigger on Account (...)`
+    trig_on = [e for e in trig_result["edges"] if e["relation"] == "triggers_on"]
+    assert len(trig_on) == 1
+    assert trig_on[0]["source"] == triggers[0]["id"]
+    assert trig_on[0]["target"] == sobject_nid("Account")
 
     # 5. SOQL inside the loop is tagged sf_in_loop: true
     trig_queries = [e for e in trig_result["edges"] if e["relation"] == "queries"]
@@ -2556,3 +2563,148 @@ def test_visualforce_dispatch_registered() -> None:
     sf.register()
     assert _DISPATCH[".page"] is extract_visualforce
     assert _DISPATCH[".component"] is extract_visualforce
+
+
+def test_aura_controller_and_child_embeds(tmp_path: Path) -> None:
+    """An Aura ``.cmp`` links to its Apex controller and its ``<c:...>`` children.
+
+    ``controller=`` -> a ``calls`` edge to ``apex_<class>``. Each ``<c:Name>`` child
+    -> an ``embeds`` edge; the ``c:`` namespace is shared by Aura and LWC, so the
+    target is disambiguated by case: uppercase-initial -> ``aura_<name>``,
+    lowercase-initial -> ``lwc_<name>`` (Aura can embed an LWC, not vice versa).
+    Base ``lightning:`` / ``aura:`` tags are ignored; a duplicate child -> one edge.
+    """
+    bundle = tmp_path / "aura" / "QuickCheckIn"
+    bundle.mkdir(parents=True)
+    (bundle / "QuickCheckIn.cmp").write_text(
+        '<aura:component controller="QuickCheckInController" access="global">\n'
+        '  <aura:attribute name="recordId" type="String" />\n'
+        '  <lightning:layout multipleRows="true">\n'
+        "    <c:QuickCheckInCard delegate=\"{!v.d}\" />\n"
+        "    <c:QuickCheckInCard delegate=\"{!v.e}\" />\n"  # duplicate -> one edge
+        "    <c:setupStatus />\n"  # lowercase -> an embedded LWC
+        "  </lightning:layout>\n"
+        "</aura:component>\n",
+        encoding="utf-8",
+    )
+    res = extract_aura(bundle / "QuickCheckIn.cmp")
+    _assert_no_dangling_edges(res)
+
+    node = res["nodes"][0]
+    assert node["id"] == "aura_quickcheckin"
+    assert node["file_type"] == "aura_component"
+    assert node["sf_aura_type"] == "component"
+
+    calls = [e for e in res["edges"] if e["relation"] == "calls"]
+    assert len(calls) == 1
+    assert calls[0]["target"] == "apex_quickcheckincontroller"
+    assert calls[0]["sf_aura_controller"] == "QuickCheckInController"
+
+    embeds = [e for e in res["edges"] if e["relation"] == "embeds"]
+    by_target = {e["target"]: e for e in embeds}
+    # Uppercase child -> Aura; lowercase child -> LWC.
+    assert by_target["aura_quickcheckincard"]["sf_embed_kind"] == "aura"
+    assert by_target["lwc_setupstatus"]["sf_embed_kind"] == "lwc"
+    # Duplicated <c:QuickCheckInCard> -> exactly one edge.
+    assert len([e for e in embeds if e["target"] == "aura_quickcheckincard"]) == 1
+    # The LWC stub is typed so it merges with the real bundle node.
+    assert next(n for n in res["nodes"] if n["id"] == "lwc_setupstatus")[
+        "file_type"
+    ] == "lwc_component"
+
+
+def test_aura_app_dependency_embeds_lwc(tmp_path: Path) -> None:
+    """A Lightning Out ``.app``'s ``<aura:dependency>`` entries embed the LWCs.
+
+    ``<aura:application extends="ltng:outApp">`` with
+    ``<aura:dependency resource="locationMap"/>`` declares each LWC it surfaces.
+    Each -> an ``embeds`` edge to ``lwc_<resource>``, matching the LWC ids the VF
+    ``$Lightning.createComponent`` calls target (cross-file resolution).
+    """
+    bundle = tmp_path / "aura" / "LightningOutApp"
+    bundle.mkdir(parents=True)
+    (bundle / "LightningOutApp.app").write_text(
+        '<aura:application extends="ltng:outApp" implements="ltng:allowGuestAccess">\n'
+        '  <aura:dependency resource="locationMap"/>\n'
+        '  <aura:dependency resource="eventSpeakersByCategory"/>\n'
+        "</aura:application>\n",
+        encoding="utf-8",
+    )
+    res = extract_aura(bundle / "LightningOutApp.app")
+    _assert_no_dangling_edges(res)
+
+    assert res["nodes"][0]["sf_aura_type"] == "application"
+    embeds = [e for e in res["edges"] if e["relation"] == "embeds"]
+    assert {e["target"] for e in embeds} == {
+        "lwc_locationmap",
+        "lwc_eventspeakersbycategory",
+    }
+    assert all(e.get("sf_aura_dependency") for e in embeds)
+
+
+def test_aura_embeds_merge_with_real_lwc(tmp_path: Path) -> None:
+    """An Aura ``<c:foo>`` LWC embed resolves to the real LWC bundle node.
+
+    The Aura component emits a stub ``lwc_editform``; the LWC's own parser emits
+    the real bundle node with the SAME id, so ``extract_sf`` merges them — the
+    embed lands on the actual bundle, not a lone stub (ADR-002).
+    """
+    aura_dir = tmp_path / "aura" / "CommsRuleEditor"
+    aura_dir.mkdir(parents=True)
+    (aura_dir / "CommsRuleEditor.cmp").write_text(
+        "<aura:component>\n"
+        "  <c:editForm recordId=\"{!v.recordId}\" />\n"
+        "</aura:component>\n",
+        encoding="utf-8",
+    )
+    lwc_dir = tmp_path / "lwc" / "editForm"
+    lwc_dir.mkdir(parents=True)
+    (lwc_dir / "editForm.js").write_text(
+        "import { LightningElement } from 'lwc';\n"
+        "export default class EditForm extends LightningElement {}\n",
+        encoding="utf-8",
+    )
+
+    res = extract_sf(tmp_path, ooe=False, fields=False)
+    by_id = {n["id"]: n for n in res["nodes"]}
+
+    # One LWC bundle node, carrying the real class label + file count (proof the
+    # Aura stub merged into it rather than duplicating).
+    bundle = by_id["lwc_editform"]
+    assert bundle["file_type"] == "lwc_component"
+    assert bundle["label"] == "EditForm"
+    assert bundle.get("sf_js_file_count") == 1
+
+    embeds = [
+        e for e in res["edges"]
+        if e["relation"] == "embeds" and e["source"] == "aura_commsruleeditor"
+    ]
+    assert [e["target"] for e in embeds] == ["lwc_editform"]
+
+
+def test_aura_parser_encoding_error(tmp_path: Path) -> None:
+    """A file that is not valid UTF-8 degrades to a single concept error node."""
+    bundle = tmp_path / "aura" / "Broken"
+    bundle.mkdir(parents=True)
+    bad = bundle / "Broken.cmp"
+    bad.write_bytes(b"<aura:component>\xff\xfe</aura:component>")
+    res = extract_aura(bad)
+    assert len(res["nodes"]) == 1
+    assert res["nodes"][0]["file_type"] == "concept"
+    assert res["nodes"][0]["sf_error_type"] == "aura_parse_error"
+    assert res["edges"] == []
+
+
+def test_aura_dispatch_registered() -> None:
+    """``register()`` wires ``.cmp`` / ``.app`` into the core dispatch; ``_parser_for``
+    guards them to an ``aura/`` directory."""
+    import graphify.salesforce as sf
+    from graphify.extract import _DISPATCH
+    from graphify.salesforce import _parser_for
+
+    sf.register()
+    assert _DISPATCH[".cmp"] is extract_aura
+    assert _DISPATCH[".app"] is extract_aura
+    # The lower-level file router only claims .cmp/.app under an aura/ directory.
+    assert _parser_for(Path("x/aura/Foo/Foo.cmp")) is extract_aura
+    assert _parser_for(Path("x/other/Foo.app")) is None
