@@ -42,18 +42,20 @@ _Last verified: 2026-07-02._
 | Relation | Source → Target | Meaning |
 |---|---|---|
 | `method_of` | method → class | Method membership |
-| `calls` | method → method / VF → Apex / LWC fn → fn | Invocation |
+| `calls` | method → method / VF → Apex / LWC fn → fn / class → flow | Invocation. Class → flow (`context: "flow_interview"`) is a `new Flow.Interview.<Name>(...)` launch (ADR-105) |
 | `queries` | method/flow → sobject | SOQL read |
 | `dml_operates_on` | method/flow/workflow → sobject | DML write |
 | `instantiates` | class → class | `new X()` |
 | `implements` | class → interface/method | Interface implementation ⚠️ |
-| `references` | field → sobject | Lookup / master-detail field reference ⚠️ |
+| `references` | field → sobject | Lookup / master-detail field reference |
+| `references` | class → class | Declared-type usage (`context: "type_ref"`): var/param/return/field type. Orphan-gated fallback — emitted only toward classes with no other incoming usage edge (pure DTOs/wrappers, ADR-104) |
 
 ### Flow
 
 | Relation | Source → Target | Meaning |
 |---|---|---|
-| `flow_invokes` | flow → Apex class | Flow ApexAction |
+| `flow_invokes` | flow → Apex class | Flow ApexAction (Flow → Apex) |
+| `calls` | class → flow | Apex launches a flow via `new Flow.Interview.<Name>(...)` (Apex → Flow, the reverse of `flow_invokes`; ADR-105) |
 
 ### LWC
 
@@ -115,8 +117,9 @@ actually emit.
 - Node types: `vf_page`, `vf_component` (new `visualforce.py`); plus base
   types `code` and `concept`, which every parser uses but are not in
   `SF_FILE_TYPES`.
-- Relations: `implements` (`apex_enhanced.py`, `apex_ts.py`), `references`
-  (`objects.py`).
+- Relations: `implements` (`apex_enhanced.py`, `apex_ts.py`).
+  (`references` was declared in `SF_RELATIONS` alongside the ADR-104
+  class→class type-ref fallback, resolving its former drift.)
 
 **Declared but never emitted** (dead schema entries):
 

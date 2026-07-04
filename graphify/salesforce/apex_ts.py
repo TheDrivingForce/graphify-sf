@@ -13,6 +13,11 @@ It extracts:
     - Method signatures (``method_of`` membership edge back to the owning class).
     - Apex -> Apex method calls (``calls`` edges; intra-file resolved here,
       cross-file deferred to ``apex_calls.resolve_apex_calls``).
+    - Apex -> Apex type references from variable / parameter / return / field
+      declarations (deferred to ``apex_calls.resolve_apex_type_refs``, which
+      links only otherwise-orphaned classes — the DTO fallback).
+    - Apex -> Flow launches via ``new Flow.Interview.<FlowApiName>(...)``
+      (``calls`` edge -> ``flow_<name>``, ``context: "flow_interview"``).
     - SOQL queries (``queries`` edge -> SObject, ``sf_in_loop`` tagged).
     - DML operations (``dml_operates_on`` edge -> SObject, ``sf_in_loop`` tagged).
     - ``implements`` of well-known interfaces (QCP, Database.Batchable hint).
@@ -189,6 +194,78 @@ def _type_element_name(type_node, source: bytes) -> str | None:
                     # For Map<K,V> this takes the first arg; DML on a Map is not
                     # meaningful, so first-arg is an acceptable best-effort.
                     return _type_element_name(c, source)
+    return None
+
+
+def _type_ref_names(type_node, source: bytes) -> list[str]:
+    """All user-class candidate names a type node mentions.
+
+    Unlike ``_type_element_name`` (DML-oriented, first generic arg only), this
+    collects EVERY class-candidate name so ``Map<Id, FlockEventResponseDto>``
+    yields the value type too:
+
+        ``Foo`` -> ``[Foo]``; ``List<Foo>`` -> ``[Foo]``;
+        ``Map<Id, Foo>`` -> ``[Foo]``; ``Foo[]`` -> ``[Foo]``.
+
+    Builtins (``_NON_SOBJECT_TYPES``) and dotted ``scoped_type_identifier`` types
+    (inner classes — out of scope, matching ``_constructed_type_name``) yield
+    nothing. Collection containers themselves are builtins; only their type
+    arguments can name a class (Apex has no user-defined generics).
+    """
+    if type_node is None:
+        return []
+    t = type_node.type
+    if t == "type_identifier":
+        name = _text(type_node, source)
+        return [name] if name and name not in _NON_SOBJECT_TYPES else []
+    if t == "generic_type":
+        names: list[str] = []
+        args = _named_child_of_type(type_node, "type_arguments")
+        if args is not None:
+            for c in args.children:
+                names.extend(_type_ref_names(c, source))
+        return names
+    if t == "array_type":
+        for c in type_node.children:
+            if c.type in ("type_identifier", "generic_type"):
+                return _type_ref_names(c, source)
+    return []
+
+
+def _declared_type_node(decl_node):
+    """The type node of a local/field/parameter declaration.
+
+    Robust to leading ``modifiers`` (``final``, ``public static`` ...): returns
+    the first child that is a type-shaped node rather than assuming position 0.
+    """
+    for c in decl_node.children:
+        if c.type in ("type_identifier", "scoped_type_identifier", "generic_type", "array_type"):
+            return c
+    return None
+
+
+def _flow_interview_name(creation_node, source: bytes) -> str | None:
+    """Return the Flow API name of a ``new Flow.Interview.<Name>(...)`` construction.
+
+    Apex launches an autolaunched flow / screen flow programmatically with
+    ``new Flow.Interview.<FlowApiName>(inputs)``. The type node is a dotted
+    ``scoped_type_identifier`` whose text is ``Flow.Interview.<FlowApiName>``;
+    ``_constructed_type_name`` deliberately returns ``None`` for such scoped types
+    (they are not Apex class links), so this handles the Flow case separately.
+
+    Returns the last dotted segment (the flow API name) only for the exact
+    ``Flow.Interview.<Name>`` shape; ``None`` for any other construction.
+    """
+    type_node = None
+    for c in creation_node.children:
+        if c.type in ("type_identifier", "scoped_type_identifier", "generic_type"):
+            type_node = c
+            break
+    if type_node is None or type_node.type != "scoped_type_identifier":
+        return None
+    parts = _text(type_node, source).split(".")
+    if len(parts) == 3 and parts[0] == "Flow" and parts[1] == "Interview" and parts[2]:
+        return parts[2]
     return None
 
 
@@ -616,10 +693,44 @@ def extract_apex(path: Path) -> dict:
     # resolution to the SF-wide `resolve_apex_refs` pass (target class is almost
     # always in another file). Collection containers (List/Set/Map) and other
     # non-class builtins are skipped; the constructed element type is what links.
+    # Also handles `new Flow.Interview.<FlowApiName>(inputs)` in the same walk: a
+    # programmatic flow launch. This is an Apex class -> Flow link, emitted as a
+    # `calls` edge (Apex invokes the flow like a method) to a flow node stub that
+    # merges with the real `flow_<name>` node parsed from the .flow-meta.xml.
     unresolved_refs: list[dict] = []
     seen_refs: set[str] = set()
+    seen_flow_calls: set[str] = set()
     for n in _walk(root):
         if n.type != "object_creation_expression":
+            continue
+        flow_name = _flow_interview_name(n, source)
+        if flow_name:
+            flow_id = f"flow_{flow_name.lower()}"
+            if flow_id not in seen_flow_calls:
+                seen_flow_calls.add(flow_id)
+                if not any(nd["id"] == flow_id for nd in nodes):
+                    # Stub only: no ``source_file`` — the real flow node owns that
+                    # (its .flow-meta.xml). Merge fills our gaps, not the reverse,
+                    # so claiming source_file here could shadow the real path if
+                    # this file is merged first.
+                    nodes.append(
+                        {
+                            "id": flow_id,
+                            "label": flow_name,
+                            "file_type": "flow",
+                        }
+                    )
+                edges.append(
+                    {
+                        "source": class_id,
+                        "target": flow_id,
+                        "relation": "calls",
+                        "context": "flow_interview",
+                        "confidence": "EXTRACTED",
+                        "source_location": f"L{_line(n)}",
+                        "source_file": str(path),
+                    }
+                )
             continue
         type_name = _constructed_type_name(n, source)
         if not type_name:
@@ -639,6 +750,39 @@ def extract_apex(path: Path) -> dict:
                 "source_file": str(path),
             }
         )
+
+    # 4.7 Apex -> Apex type references via declarations (orphan fallback) --
+    # A class used ONLY as a variable / parameter / return / field type (a pure
+    # DTO handed around but never `new`-ed and with no methods to call) produces
+    # no `calls` or `instantiates` edge. Collect each declared type name once per
+    # class and defer to `resolve_apex_type_refs`, which emits `references` edges
+    # only toward classes that would otherwise be orphaned — so the thousands of
+    # routine declarations across a codebase do not each become an edge.
+    unresolved_type_refs: list[dict] = []
+    seen_type_refs: set[str] = set()
+
+    def _collect_type_refs(type_node, site) -> None:
+        for type_name in _type_ref_names(type_node, source):
+            key = type_name.lower()
+            if key == class_name.lower() or key in seen_type_refs:
+                continue
+            seen_type_refs.add(key)
+            unresolved_type_refs.append(
+                {
+                    "caller_id": class_id,
+                    "type_name": type_name,
+                    "source_location": f"L{_line(site)}",
+                    "source_file": str(path),
+                }
+            )
+
+    for n in _walk(root):
+        if n.type in ("local_variable_declaration", "formal_parameter", "field_declaration"):
+            _collect_type_refs(_declared_type_node(n), n)
+        elif n.type == "method_declaration":
+            ret_node = _return_type_node(n, source)
+            if ret_node is not None and ret_node.type != "void_type":
+                _collect_type_refs(ret_node, n)
 
     # 5. Implements (QCP / Batchable hint) --------------------------------
     implements = _implements_text(definition, source)
@@ -676,6 +820,8 @@ def extract_apex(path: Path) -> dict:
         nodes[0]["sf_unresolved_calls"] = unresolved_calls
     if unresolved_refs:
         nodes[0]["sf_unresolved_refs"] = unresolved_refs
+    if unresolved_type_refs:
+        nodes[0]["sf_unresolved_type_refs"] = unresolved_type_refs
 
     return {"nodes": nodes, "edges": edges}
 
@@ -717,9 +863,8 @@ def _method_param_text(method_node, source: bytes) -> str:
     return ", ".join(parts)
 
 
-def _method_return_type(method_node, source: bytes) -> str:
-    """Return-type text: the node(s) before the method name. ``void`` for
-    ``void_type``; the type text otherwise; empty for constructors."""
+def _return_type_node(method_node, source: bytes):
+    """The return-type node preceding the method name (``None`` for constructors)."""
     params = _named_child_of_type(method_node, "formal_parameters")
     name = _method_name(method_node, source)
     ret_node = None
@@ -737,6 +882,13 @@ def _method_return_type(method_node, source: bytes) -> str:
         elif c.type == "identifier" and name is not None and _text(c, source) == name:
             # reached the method name — stop
             break
+    return ret_node
+
+
+def _method_return_type(method_node, source: bytes) -> str:
+    """Return-type text: the node(s) before the method name. ``void`` for
+    ``void_type``; the type text otherwise; empty for constructors."""
+    ret_node = _return_type_node(method_node, source)
     if ret_node is None:
         return ""
     if ret_node.type == "void_type":

@@ -1,5 +1,33 @@
 # Release Notes
 
+## 2026-07-04 14:30
+
+### Features
+
+#### Apex → Flow launches now produce a `calls` edge
+
+Apex can launch a flow programmatically with `new Flow.Interview.<FlowApiName>(inputs)` (e.g. `EmailSendUsingFlow.cls` launching `Send_Email_Using_Flow`). This Apex → Flow dependency was invisible — the only flow-crossing relation was `flow_invokes`, which runs the *reverse* direction (Flow ApexAction → Apex). The construction's type node is a dotted `scoped_type_identifier` that `_constructed_type_name` skips as a non-class type, so the `new`-expression walk produced no edge.
+
+The tree-sitter parser ([apex_ts.py](../graphify/salesforce/apex_ts.py)) now detects the exact `Flow.Interview.<Name>` shape (new `_flow_interview_name` helper) in the same `object_creation_expression` walk and emits a **`calls`** edge (`context: "flow_interview"`, `EXTRACTED`) from the Apex class node to `flow_<name>`, plus a flow-node stub so the per-file edge isn't dangling. The stub merges with the real flow node from `<Name>.flow-meta.xml` by shared id — both sides lowercase the same underscore-preserving API name, so resolution is deterministic. `calls` was reused because launching a flow is semantically a call; its consumers (`drop_same_class_calls`, recursion detection) all safely ignore the class → flow shape. Verified on eventspark: `apex_emailsendusingflow` → `flow_send_email_using_flow` resolves to the real flow node, 0 dangling. Recorded as ADR-105.
+
+## 2026-07-04 12:00
+
+### Features
+
+#### Orphan DTO / wrapper classes now linked via type declarations (`references` edges)
+
+Pure DTO classes with no methods that are never `new`-ed (e.g. `FlockEventResponseDto`, only ever declared as a variable/parameter/return/field type) were orphan nodes — the `instantiates` fallback only covers `new X()`. The tree-sitter parser ([apex_ts.py](../graphify/salesforce/apex_ts.py)) now collects every declared type name (locals, parameters, method return types, and class fields via a new `field_declaration` visitor; generics unwrap through `List<X>`/`Map<K,V>`/`Foo[]`) as deferred `sf_unresolved_type_refs`, deduped per class. A new pass, `resolve_apex_type_refs` ([apex_calls.py](../graphify/salesforce/apex_calls.py)), runs after call + instantiation resolution and emits **`references`** edges (`context: "type_ref"`, `EXTRACTED`) **only toward classes that would otherwise be orphaned** — no incoming non-membership edge from outside the class. All consumers of an orphan link to it (one edge per class pair), so the thousands of routine type declarations across an org stay out of the graph while type-only DTOs become reachable.
+
+On by default; **`--no-type-refs`** suppresses the edges (deferred metadata is still consumed so it never leaks into `graph.json`). `references` — previously emitted by `objects.py` for lookup fields but undeclared — is now registered in `SF_RELATIONS` and mapped to `REFERENCES` for Neo4j. Recorded as ADR-104.
+
+The orphan gate ignores non-usage relations: membership (`method_of`/`field_of`) and profile/permission-set grants (`grants_access_to`) — a profile grants access to nearly every class in an org (1,142 such edges in eventspark), which would otherwise defeat the gate for almost every DTO.
+
+### Fixes
+
+#### `.sfdx` CLI cache no longer parsed as org source
+
+Extracting from a repo root pulled in `.sfdx\tools\<ver>\StandardApexLibrary\**\*.cls` — thousands of Salesforce standard-library stubs that are not org code. On eventspark this was **11,186 of 17,532 nodes (64%)**, and stub classes named after SObjects (`EmailMessage`, `Contract`, `Asset`, ...) hijacked type-name resolution. The `extract_sf` walk ([\_\_init\_\_.py](../graphify/salesforce/__init__.py)) previously applied only `.graphifyignore` patterns; it now prunes noise directories exactly like the core `collect_files` walk, and `.sfdx`/`.sf`/`.localdevserver` were added to `_SKIP_DIRS` in [detect.py](../graphify/detect.py) (benefits the base pipeline too). Eventspark after the fix: 6,347 nodes, 0 from `.sfdx`; the type-ref fallback dropped from 181 edges (149 pointing at stubs) to 32 edges across 14 genuine DTO/wrapper/interface classes.
+
 ## 2026-07-04 00:00
 
 ### Features

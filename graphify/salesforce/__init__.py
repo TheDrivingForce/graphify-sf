@@ -239,6 +239,7 @@ def extract_sf(
     ooe: bool = True,
     fields: bool = True,
     no_same_class_calls: bool = False,
+    no_type_refs: bool = False,
     **kwargs,
 ):
     """Extract a Salesforce repository into a knowledge graph.
@@ -284,12 +285,20 @@ def extract_sf(
             callee belong to the same class, keeping only inter-class call links.
             Applied after cross-file call resolution so downstream passes
             (recursion detection) see the filtered set.
+        no_type_refs: If ``True``, skip the orphan-fallback ``references`` edges
+            that link a class to otherwise-orphaned classes it uses purely as a
+            variable/parameter/return/field type (pure DTOs / wrappers).
         **kwargs: Reserved for future options (neo4j-uri, …); currently ignored.
 
     Returns:
         ``{"nodes": [...], "edges": [...]}`` — the merged, analyzed graph.
     """
-    from .apex_calls import drop_same_class_calls, resolve_apex_calls, resolve_apex_refs
+    from .apex_calls import (
+        drop_same_class_calls,
+        resolve_apex_calls,
+        resolve_apex_refs,
+        resolve_apex_type_refs,
+    )
     from .cpq import cpq_analysis_pass
     from .flow_cpq_loops import detect_flow_cpq_loops
     from .mdt_mapping import mdt_mapping_pass
@@ -305,16 +314,26 @@ def extract_sf(
     if root.is_file():
         files = [root]
     else:
-        from graphify.detect import _is_ignored, _load_graphifyignore
+        import os
+
+        from graphify.detect import _is_ignored, _is_noise_dir, _load_graphifyignore
 
         ignore_patterns = _load_graphifyignore(root)
         ignore_cache: dict = {}
-        files = sorted(
-            p
-            for p in root.rglob("*")
-            if p.is_file()
-            and not _is_ignored(p, root, ignore_patterns, _cache=ignore_cache)
-        )
+        files = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dp = Path(dirpath)
+            # Prune VCS / cache / tooling dirs (.git, node_modules, and the
+            # Salesforce CLI's .sfdx — whose StandardApexLibrary stubs would
+            # otherwise flood the graph with non-org classes). Mirrors the core
+            # ``collect_files`` walk; previously the SF walk applied only
+            # .graphifyignore patterns and parsed everything else.
+            dirnames[:] = [d for d in dirnames if not _is_noise_dir(d, dp)]
+            for fname in filenames:
+                p = dp / fname
+                if not _is_ignored(p, root, ignore_patterns, _cache=ignore_cache):
+                    files.append(p)
+        files.sort()
 
     all_nodes: list[dict] = []
     all_edges: list[dict] = []
@@ -358,6 +377,14 @@ def extract_sf(
     # Link `new X()` instantiations so pure DTO / wrapper classes (no methods,
     # never the target of a `calls` edge) are not orphaned.
     all_edges.extend(resolve_apex_refs(all_nodes, all_edges))
+    # Orphan fallback: link classes used ONLY as a declared type (var/param/
+    # return/field) — must run after call + instantiation resolution so the
+    # orphan gate sees every usage edge. Always invoked so the deferred
+    # sf_unresolved_type_refs metadata is consumed off the nodes; --no-type-refs
+    # merely discards the resulting edges.
+    type_ref_edges = resolve_apex_type_refs(all_nodes, all_edges)
+    if not no_type_refs:
+        all_edges.extend(type_ref_edges)
     # Optionally keep only inter-class call links (--no-same-class-calls): drop
     # intra-class method->method calls before downstream passes consume them.
     if no_same_class_calls:

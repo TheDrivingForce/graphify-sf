@@ -61,6 +61,8 @@ SF_RELATIONS = {
     "dml_operates_on",      # DML site -> SObject
     "method_of",            # Apex method -> its class (membership; mirrors field_of)
     "calls",                # Apex method -> Apex method (intra/cross-file call)
+    "references",           # Apex class -> class used only as a declared type
+                            # (var/param/return/field) — orphan-gated DTO fallback
 
     # Flow
     "flow_invokes",         # Flow ApexAction -> Apex class

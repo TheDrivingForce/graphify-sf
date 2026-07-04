@@ -2,7 +2,7 @@
 graphify-sf: ``graphify sf`` command-line interface.
 
 Subcommands:
-    extract <path> [--output-dir] [--cpq-data] [--no-ooe] [--no-fields] [--no-same-class-calls]   build + enrich an SF graph.json
+    extract <path> [--output-dir] [--cpq-data] [--no-ooe] [--no-fields] [--no-same-class-calls] [--no-type-refs]   build + enrich an SF graph.json
     cluster-only [path] [--graph]               re-cluster an existing SF graph.json (SF-safe)
     serve <graph.json>                           run the base MCP server
     impact <node> [--direction] [--depth]        impact traversal
@@ -14,6 +14,7 @@ Subcommands:
     --no-fields            supresses generation of the field nodes in the graph
     --no-ooe               supresses generation of the order of execution nodes in the graph
     --no-same-class-calls  only adds `calls` links between classes (drops intra-class method calls)
+    --no-type-refs         suppresses the orphan-fallback `references` edges (classes used only as a declared type)
 
 Use ``graphify-sfdx cluster-only`` instead of the base ``graphify cluster-only`` — the base
 command runs in a separate Python environment that may not have SF file types whitelisted,
@@ -69,6 +70,7 @@ def _cmd_extract(args: argparse.Namespace) -> int:
         ooe=not args.no_ooe,
         fields=not args.no_fields,
         no_same_class_calls=args.no_same_class_calls,
+        no_type_refs=args.no_type_refs,
     )
     G = build_sf_graph(extraction)
     graph_file = write_sf_graph(G, out_dir / "graph.json")
@@ -210,6 +212,9 @@ def _build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--no-same-class-calls", dest="no_same_class_calls",
                     action="store_true", default=False,
                     help="only link calls between classes; drop intra-class method->method calls")
+    pe.add_argument("--no-type-refs", dest="no_type_refs",
+                    action="store_true", default=False,
+                    help="skip orphan-fallback `references` edges for classes used only as a declared type")
     pe.set_defaults(func=_cmd_extract)
 
     pco = sub.add_parser("cluster-only", help="re-cluster an existing SF graph.json (SF-safe, use instead of base graphify cluster-only)")

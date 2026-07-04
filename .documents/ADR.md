@@ -262,3 +262,119 @@ merges with the real object node (ADR-002) via a stub (ADR-012), and the
   Validation Rules; the trigger→object relationship is traversable.
 - **No new plumbing was required** — the relation was already registered in every
   downstream consumer, so the change is purely additive at the parser layer.
+
+---
+
+## ADR-104 — Orphan-gated `references` edges for type-only Apex classes
+
+**Status:** Accepted — 2026-07-04
+
+### Context
+
+Pure DTO / wrapper classes (e.g. `FlockEventResponseDto`) that declare no
+methods and are never constructed with `new` end up as orphan nodes, even
+though other classes clearly depend on them by declaring variables, parameters,
+return types, or fields of that type. The existing anti-orphan mechanism —
+`new X()` collected as `sf_unresolved_refs` and resolved into `instantiates`
+edges (upstream Phase B) — misses classes handed around purely by type.
+Emitting an edge for *every* type declaration is not an option: a real org has
+thousands of such declarations, and unconditional edges would drown the call
+graph in low-signal links.
+
+### Decision
+
+Collect declared type names during the tree-sitter walk (locals, parameters,
+method return types, and a new `field_declaration` visitor — the field case is
+what links DTO-in-DTO nesting) as `sf_unresolved_type_refs`, deduped per class.
+A new post-parse pass, `resolve_apex_type_refs`, runs AFTER
+`resolve_apex_calls` and `resolve_apex_refs` and emits a `references` edge
+(`context: "type_ref"`, `EXTRACTED`) only toward classes that are still
+**orphaned** — no incoming *usage* edge from outside the class itself, on the
+class node or any of its method nodes. Non-usage relations are excluded from
+the gate: membership (`method_of`/`field_of`) is structure, and profile /
+permission-set grants (`grants_access_to`) are administrative — a profile
+grants access to nearly every class in an org (1,142 such edges in eventspark),
+which says nothing about actual usage and would otherwise defeat the gate for
+almost every DTO. When a class is orphaned, ALL classes referencing it are linked
+(one edge per source→target pair), so the graph shows the DTO's real consumers.
+Name resolution mirrors `resolve_apex_refs`: a type name links only when
+exactly one Apex class declares that label; ambiguous names get no edge.
+
+The relation reuses `references`, matching the base extractor's convention for
+type usage in other languages (`context` = `parameter_type`/`return_type`/...)
+and `objects.py`'s field→sobject lookups; it is now declared in `SF_RELATIONS`
+(resolving its former schema drift) and mapped to `REFERENCES` in Neo4j.
+Default ON; `--no-type-refs` suppresses the edges (the deferred metadata is
+still consumed so it never leaks into the exported graph).
+
+### Consequences
+
+- **Type-only DTOs are reachable** in impact analysis and community detection
+  instead of floating as orphans; edge volume stays tiny because the fallback
+  fires only for otherwise-orphaned classes.
+- **Well-connected classes gain nothing** — a class already called or
+  instantiated anywhere never receives `references` edges, so routine
+  declarations stay out of the graph by design.
+- Internal-only activity does not de-orphan: a class whose own methods call
+  each other but that nobody references still counts as an orphan and gets the
+  fallback — deliberate, since the gate asks "does anyone OUTSIDE use it?".
+- The gate is computed once, before the pass emits; `references` edges added by
+  the pass do not un-orphan a target for later sources (deterministic,
+  order-independent output).
+
+---
+
+## ADR-105 — Apex → Flow launch as a `calls` edge
+
+**Status:** Accepted — 2026-07-04
+
+### Context
+
+Apex launches a flow programmatically with
+`Flow.Interview.<FlowApiName> f = new Flow.Interview.<FlowApiName>(inputs); f.start();`
+(e.g. `EmailSendUsingFlow.cls` in eventspark launching `Send_Email_Using_Flow`).
+This is a direct Apex → Flow dependency, but nothing captured it: the only
+flow-crossing relation was `flow_invokes` (Flow ApexAction → Apex, the *reverse*
+direction). The construction's type node is a dotted `scoped_type_identifier`
+(`Flow.Interview.Send_Email_Using_Flow`), which `_constructed_type_name`
+deliberately returns `None` for (scoped types are not Apex class links), so the
+`new`-expression walk skipped it and no edge was produced.
+
+### Decision
+
+Detect the `new Flow.Interview.<Name>(...)` shape in the existing
+`object_creation_expression` walk (`apex_ts` section 4.6) via a new
+`_flow_interview_name` helper that matches exactly the three-segment
+`Flow.Interview.<Name>` scoped type and returns the last segment (the flow API
+name). Emit a **`calls`** edge (`context: "flow_interview"`, `EXTRACTED`) from
+the Apex **class** node (`apex_<stem>`) to `flow_<name.lower()>`, plus a flow
+node **stub** (id + label + `file_type: "flow"`, no `source_file`) so the
+per-file edge is not dangling before merge. The stub merges with the real flow
+node parsed from `<Name>.flow-meta.xml` by shared id (ADR-002/ADR-012):
+`_flow_name` and the Apex side both lowercase the identical underscore-preserving
+API name, so ids match deterministically with no fuzzy resolution. The stub
+omits `source_file` precisely so it cannot shadow the real flow's definition path
+when merged first (`_merge_into` fills gaps, first-write-wins).
+
+`calls` was chosen over a new relation because launching a flow is semantically a
+call (Apex invokes the flow like a method); the relation is already registered
+(`SF_RELATIONS`, `CALLS` in Neo4j) and its consumers all safely ignore the
+class → flow shape: `drop_same_class_calls` / `_owner_class_id` operate only on
+method-node endpoints, and recursion detection can't cycle through a flow node
+(flows have no outgoing `calls`). The `context` attribute distinguishes flow
+launches from method calls for any consumer that cares.
+
+### Consequences
+
+- **Apex → Flow dependencies are now traversable** in impact analysis, and a
+  flow's callers are visible alongside its `flow_invokes` callees — the two
+  relations together give the full bidirectional Apex ↔ Flow picture.
+- **Detection is deterministic**, keyed on the `new Flow.Interview.X` construction
+  rather than the fragile `f.start()` call site (which would need variable-type
+  tracking to a flow); the launch is the reliable signal.
+- Only the tree-sitter parser handles this; the regex fallback (`apex_enhanced`)
+  does not, consistent with `instantiates` (ADR precedent) — the fallback is a
+  degraded path used only when the grammar is unavailable.
+- Verified on eventspark: `apex_emailsendusingflow` → `flow_send_email_using_flow`
+  resolves to the real flow node (its `source_file` is the `.flow-meta.xml`),
+  0 dangling.
